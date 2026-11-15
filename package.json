@@ -1,0 +1,34 @@
+{
+  "name": "curationist",
+  "version": "1.1.0",
+  "description": "VS Code-styled dense desktop media & preset curation studio for nowPlaylisting and obSpiltMilk OBS plugins",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "icons": "electron tools/generate-icons.mjs",
+    "build": "tsc && vite build",
+    "build:vite": "tsc && vite build",
+    "package": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/package-windows.ps1",
+    "start": "electron .",
+    "test": "npx tsx tests/preset-import.test.ts"
+  },
+  "dependencies": {
+    "music-metadata": "^10.6.4",
+    "node-id3": "^0.2.9"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^35.0.0",
+    "lucide-react": "^0.475.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3",
+    "vite": "^6.2.0",
+    "vite-plugin-electron": "^0.29.0",
+    "vite-plugin-electron-renderer": "^0.14.6"
+  }
+}

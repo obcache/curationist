@@ -1,0 +1,104 @@
+#define MyAppName "Curationist"
+#define MyAppVersion "1.1.0"
+#define MyAppPublisher "sorryneedboost.com"
+#define MyAppURL "https://sorryneedboost.com"
+#define MyAppExeName "Curationist.exe"
+#define RepoRoot RemoveBackslashUnlessRoot(ExtractFileDir(RemoveBackslashUnlessRoot(SourcePath)))
+#define StageDir RepoRoot + "\release\win-unpacked"
+#define InstallerOutDir RepoRoot + "\release\installer"
+
+[Setup]
+AppId={{8D4E92A1-6C3B-4F18-9A72-5E10C8B42D19}
+AppName={#MyAppName}
+AppVersion={#MyAppVersion}
+AppVerName={#MyAppName} {#MyAppVersion}
+AppPublisher={#MyAppPublisher}
+AppPublisherURL={#MyAppURL}
+AppSupportURL={#MyAppURL}
+AppUpdatesURL={#MyAppURL}
+DefaultDirName={autopf}\{#MyAppName}
+DefaultGroupName={#MyAppName}
+DisableProgramGroupPage=yes
+; Windows 11 (Build 22000+) only
+MinVersion=10.0.22000
+; 64-bit x64 only
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
+PrivilegesRequired=lowest
+PrivilegesRequiredOverridesAllowed=dialog
+OutputDir={#InstallerOutDir}
+OutputBaseFilename=Curationist-{#MyAppVersion}-win11-x64
+Compression=lzma2/fast
+LZMANumBlockThreads=4
+SolidCompression=no
+WizardStyle=modern dark
+SetupIconFile={#RepoRoot}\build\icon.ico
+WizardImageFile={#RepoRoot}\installer\wizard-large.png
+WizardSmallImageFile={#RepoRoot}\installer\wizard-small.png
+WizardImageBackColor=#0f121c
+UninstallDisplayIcon={app}\{#MyAppExeName}
+UninstallDisplayName={#MyAppName}
+CloseApplications=yes
+RestartApplications=no
+
+[Languages]
+Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[Messages]
+WindowsVersionNotSupported=Curationist requires 64-bit Windows 11 (Build 22000 or newer).
+
+[Tasks]
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+
+[Files]
+Source: "{#StageDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[Icons]
+Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+
+[Run]
+Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+function InitializeSetup: Boolean;
+var
+  Version: TWindowsVersion;
+begin
+  GetWindowsVersionEx(Version);
+  if (not IsWin64) or (Version.Major < 10) or ((Version.Major = 10) and (Version.Build < 22000)) then
+  begin
+    MsgBox(
+      'Curationist requires 64-bit Windows 11 (Build 22000 or later).' + #13#10 + #13#10 +
+      Format('Detected Windows build: %d.%d.%d', [Version.Major, Version.Minor, Version.Build]),
+      mbCriticalError,
+      MB_OK
+    );
+    Result := False;
+    Exit;
+  end;
+  Result := True;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  AppDataPath: String;
+begin
+  if CurUninstallStep = usPostUninstall then
+  begin
+    AppDataPath := ExpandConstant('{userappdata}\curationist');
+    if DirExists(AppDataPath) then
+    begin
+      if MsgBox(
+        'Do you also want to remove your local Curationist SQLite database and preferences at:' + #13#10 +
+        AppDataPath + ' ?' + #13#10 + #13#10 +
+        '(Your OBS plugin JSON/DAT files and managed media files will NOT be deleted.)',
+        mbConfirmation,
+        MB_YESNO or MB_DEFBUTTON2
+      ) = IDYES then
+      begin
+        DelTree(AppDataPath, True, True, True);
+      end;
+    end;
+  end;
+end;

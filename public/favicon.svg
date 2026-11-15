@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none">
+  <defs>
+    <linearGradient id="curationist-stem" x1="50" y1="6" x2="88" y2="70" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#8affff"/>
+      <stop offset="35%" stop-color="#00f2ff"/>
+      <stop offset="100%" stop-color="#00b4ff"/>
+    </linearGradient>
+    <radialGradient id="curationist-milk" cx="37" cy="60" r="30" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="68%" stop-color="#f2fbff"/>
+      <stop offset="100%" stop-color="#bdeaff"/>
+    </radialGradient>
+    <radialGradient id="curationist-mag" cx="25" cy="82" r="22" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#ff1eb8" stop-opacity="0.92"/>
+      <stop offset="60%" stop-color="#ff38cb" stop-opacity="0.32"/>
+      <stop offset="100%" stop-color="#ff38cb" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="curationist-cyan" cx="53" cy="81" r="21" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#00ecff" stop-opacity="0.92"/>
+      <stop offset="60%" stop-color="#00ccff" stop-opacity="0.32"/>
+      <stop offset="100%" stop-color="#00ccff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="curationist-rim" x1="14" y1="92" x2="88" y2="8" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#ff24c4"/>
+      <stop offset="50%" stop-color="#6052ff"/>
+      <stop offset="100%" stop-color="#00f4ff"/>
+    </linearGradient>
+  </defs>
+  <g stroke="#060916" stroke-width="6.5" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M50 68 L50 12 A6.75 6.75 0 0 1 63.5 11.2 C66.5 18 89.5 23.5 88.5 37.5 C88 43.2 78.5 43.2 78.8 37.5 C79.1 29.5 68.5 25 63.5 24 L63.5 68 Z"/>
+    <path d="M63.5 68.5 A25 25 0 0 1 13.5 68.5 C13.5 55 29.5 42 38.5 33.5 C47.5 42 63.5 55 63.5 68.5 Z"/>
+  </g>
+  <path d="M50 68 L50 12 A6.75 6.75 0 0 1 63.5 11.2 C66.5 18 89.5 23.5 88.5 37.5 C88 43.2 78.5 43.2 78.8 37.5 C79.1 29.5 68.5 25 63.5 24 L63.5 68 Z" fill="url(#curationist-stem)"/>
+  <path d="M63.5 68.5 A25 25 0 0 1 13.5 68.5 C13.5 55 29.5 42 38.5 33.5 C47.5 42 63.5 55 63.5 68.5 Z" fill="url(#curationist-milk)" stroke="#060916" stroke-width="2.6"/>
+  <path d="M63.5 68.5 A25 25 0 0 1 13.5 68.5 C13.5 55 29.5 42 38.5 33.5 C47.5 42 63.5 55 63.5 68.5 Z" fill="url(#curationist-mag)"/>
+  <path d="M63.5 68.5 A25 25 0 0 1 13.5 68.5 C13.5 55 29.5 42 38.5 33.5 C47.5 42 63.5 55 63.5 68.5 Z" fill="url(#curationist-cyan)"/>
+  <path d="M14.8 69.5 L25.5 69.5 L29.2 63.2 L33.2 75.5 L38.5 55.8 L43.8 75.5 L47.8 63.5 L51.5 69.5 L62.2 69.5" stroke="#060919" stroke-width="4.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M63.5 68.5 A25 25 0 0 1 13.5 68.5 C13.5 55 29.5 42 38.5 33.5 C47.5 42 63.5 55 63.5 68.5 Z" stroke="url(#curationist-rim)" stroke-width="1.3"/>
+</svg>
