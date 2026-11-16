@@ -68,7 +68,7 @@ export const TitleBar: React.FC<TitleBarProps> = ({
               letterSpacing: 0
             }}
           >
-            v1.1.0
+            v1.2.0
           </span>
         </div>
 

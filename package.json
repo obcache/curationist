@@ -1,6 +1,6 @@
 {
   "name": "curationist",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "VS Code-styled dense desktop media & preset curation studio for nowPlaylisting and obSpiltMilk OBS plugins",
   "main": "dist-electron/main.js",
   "scripts": {
