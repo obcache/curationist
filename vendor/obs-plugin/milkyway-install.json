@@ -1,0 +1,99 @@
+{
+  "product": "milkyWay OBS Plugin",
+  "schemaVersion": 1,
+  "version": "1.2.4",
+  "minimumObs": "33.0",
+  "testHooks": false,
+  "files": [
+    {
+      "path": "data/effects/artwork.effect",
+      "sha256": "a8db1c05456fce777824f94f5459b603168b8ee512ecfbca894c5a534a2e7ced",
+      "size": 2560
+    },
+    {
+      "path": "data/manifest.json",
+      "sha256": "8ff3c999050c7c529ab2b76d129e59f9ca4066997a8bf9815b6b347ff2cad839",
+      "size": 243
+    },
+    {
+      "path": "licenses/NOTICE.txt",
+      "sha256": "8049587db0c1859ed1dfcd5522c18307723688d5d9d0d3dd0449bb4147dc4b99",
+      "size": 565
+    },
+    {
+      "path": "licenses/OBS-FFmpeg-GPL-2.0.txt",
+      "sha256": "8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643",
+      "size": 18092
+    },
+    {
+      "path": "licenses/engine-dependencies/Apache-2.0.txt",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "size": 11358
+    },
+    {
+      "path": "licenses/engine-dependencies/CC0-1.0.txt",
+      "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499",
+      "size": 7048
+    },
+    {
+      "path": "licenses/engine-dependencies/PowerVR-MIT.txt",
+      "sha256": "b1aea79afab593649ede742eccbb7feb74d216d52d120b99c4d349133871ba9f",
+      "size": 1093
+    },
+    {
+      "path": "licenses/engine-dependencies/SOIL2-MIT-0.txt",
+      "sha256": "a716b99af40ea87eb912a31f97edd481fa05c6c8737657e6d59259b6507ea0e4",
+      "size": 915
+    },
+    {
+      "path": "licenses/engine-dependencies/glad-2.0.8.txt",
+      "sha256": "cbb325cd4ac5bd06717ffa34a322b984f9d285e4c67c8ca1b7380d6ef08c2a77",
+      "size": 3014
+    },
+    {
+      "path": "licenses/engine-dependencies/glm-0.9.9.0.txt",
+      "sha256": "abb7560f49f306faea55a831de5953bd168a996bbd95ef1dabb042bff11f5922",
+      "size": 2501
+    },
+    {
+      "path": "licenses/engine-dependencies/native-notices.txt",
+      "sha256": "85ad689ef013b732002d742141bb5174de899e9a079415121dd5e4ac42ddf2e9",
+      "size": 9366
+    },
+    {
+      "path": "licenses/engine-dependencies/provenance.json",
+      "sha256": "f9279508bb774a86c461520b1b49f18fcd390b572400428c02a727f5a5169bbc",
+      "size": 1188
+    },
+    {
+      "path": "licenses/hlslparser-MIT.txt",
+      "sha256": "89c479cf8c9825f4d745dc645da4af447e49b58c51636998a75473f0f07bcd5a",
+      "size": 1125
+    },
+    {
+      "path": "licenses/projectM-COPYING.txt",
+      "sha256": "bf67ded9917efe55a415e5b02c6fd45f419770ebfc1da592a5d920f904cd8017",
+      "size": 891
+    },
+    {
+      "path": "licenses/projectM-LGPL-2.1.txt",
+      "sha256": "0fecfb1582cb164c14e948a4f28447689b3fbf2866d03c09a353c9c5fc93610d",
+      "size": 24841
+    },
+    {
+      "path": "licenses/projectm-eval-MIT.txt",
+      "sha256": "6e88be4fe54c68a76f296f332faa566916121ef9ce5afbc8dc99414c3135a5af",
+      "size": 1142
+    },
+    {
+      "path": "milkyway-projectm.dll",
+      "sha256": "2b0d7ae96323f33bed9291e81fbbf3983ffdbd6ed9868f0d1d887c74d05e525e",
+      "size": 1181184
+    },
+    {
+      "path": "milkyway.dll",
+      "sha256": "62d38ffe2cecf11ffaa84c265fe4676781af54a6b39f62ad2b20d3839a0c8473",
+      "size": 460288
+    }
+  ]
+}

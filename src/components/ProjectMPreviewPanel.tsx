@@ -14,10 +14,13 @@ import {
   Unlock,
   WifiOff
 } from 'lucide-react'
+import { ObsLedToggle, ObsVideoSettingsModal } from './ObsSourceSettingsModal'
+import type { ObsConnectionState, ObsQueue, ObsStatus } from '../types'
 
 interface ProjectMPreviewPanelProps {
   activePresetPath?: string | null
   activePresetLabel?: string | null
+  previewNonce?: number
   onPrevPreset?: () => void
   onNextPreset?: () => void
   hasPrevPreset?: boolean
@@ -29,11 +32,17 @@ interface ProjectMPreviewPanelProps {
   presetDurationSec?: number
   onChangePresetDurationSec?: (sec: number) => void
   onTogglePlaylistPlay?: () => void
+  obsVideoMode?: boolean
+  onToggleObsVideoMode?: () => void
+  obsConnection?: ObsConnectionState
+  selectedObsVideoSourceId?: string
+  onSelectObsVideoSourceId?: (id: string) => void
 }
 
 export const ProjectMPreviewPanel: React.FC<ProjectMPreviewPanelProps> = ({
   activePresetPath,
   activePresetLabel,
+  previewNonce = 0,
   onPrevPreset,
   onNextPreset,
   hasPrevPreset = false,
@@ -44,7 +53,12 @@ export const ProjectMPreviewPanel: React.FC<ProjectMPreviewPanelProps> = ({
   playingPlaylistName = null,
   presetDurationSec = 15,
   onChangePresetDurationSec,
-  onTogglePlaylistPlay
+  onTogglePlaylistPlay,
+  obsVideoMode = false,
+  onToggleObsVideoMode,
+  obsConnection,
+  selectedObsVideoSourceId = '',
+  onSelectObsVideoSourceId
 }) => {
   const containerRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -71,7 +85,83 @@ export const ProjectMPreviewPanel: React.FC<ProjectMPreviewPanelProps> = ({
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [frameCounter, setFrameCounter] = useState(0)
 
+  const [obsStatus, setObsStatus] = useState<ObsStatus | null>(null)
+  const [obsQueue, setObsQueue] = useState<ObsQueue | null>(null)
+  const [showObsVideoSettings, setShowObsVideoSettings] = useState(false)
+
+  const videoSources = obsConnection?.sources.filter((s) => s.kind === 'video') || []
+  const activeObsVideoSourceId =
+    selectedObsVideoSourceId &&
+    (videoSources.length === 0 || videoSources.some((s) => s.sourceId === selectedObsVideoSourceId))
+      ? selectedObsVideoSourceId
+      : videoSources[0]?.sourceId || ''
+
+  // Poll OBS milkyWay Video source when OB LED is ON and connected
+  useEffect(() => {
+    if (!obsVideoMode || !obsConnection?.connected || !activeObsVideoSourceId) {
+      setObsStatus(null)
+      setObsQueue(null)
+      return
+    }
+    let disposed = false
+    let timer: ReturnType<typeof setTimeout>
+    let signature = ''
+
+    const poll = async () => {
+      try {
+        const st = await window.curationist.getObsSourceStatus(activeObsVideoSourceId)
+        if (disposed) return
+        setObsStatus(st)
+        const sig = `${st.revision}:${st.playbackEpoch}:${st.remaining}:${st.state}`
+        if (sig !== signature) {
+          const q = await window.curationist.getObsSourceQueue(activeObsVideoSourceId)
+          if (!disposed) {
+            setObsQueue(q)
+            signature = sig
+          }
+        }
+      } catch {
+        // ignore
+      } finally {
+        if (!disposed) {
+          timer = setTimeout(() => {
+            void poll()
+          }, 350)
+        }
+      }
+    }
+
+    void poll()
+    return () => {
+      disposed = true
+      clearTimeout(timer)
+    }
+  }, [obsVideoMode, obsConnection?.connected, activeObsVideoSourceId])
+
+  const sendObsVideoCommand = async (
+    action: 'play' | 'pause' | 'stop' | 'restart' | 'next' | 'previous'
+  ) => {
+    if (!obsConnection?.connected) {
+      onNotify?.('OBS WebSocket is not connected. Open Preferences -> OBS Integration to connect.')
+      return
+    }
+    if (!activeObsVideoSourceId) {
+      onNotify?.('No Curationist Visualizer source found in OBS. Add a "Curationist Visualizer" source in OBS first.')
+      return
+    }
+    try {
+      const st = await window.curationist.controlObsSource({
+        sourceId: activeObsVideoSourceId,
+        action
+      })
+      setObsStatus(st)
+    } catch (err: any) {
+      onNotify?.(`OBS Visualizer control error: ${err?.message || String(err)}`)
+    }
+  }
+
   const lastSentPathRef = useRef<string | null>(null)
+  const obsMirroredPathRef = useRef<string | null>(null)
 
   const sendCommand = useCallback((cmd: Record<string, any>) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -114,9 +204,10 @@ export const ProjectMPreviewPanel: React.FC<ProjectMPreviewPanelProps> = ({
           return
         }
         setConnected(true)
-        const currentPath = activePresetPathRef.current
+        const currentPath = obsMirroredPathRef.current || activePresetPathRef.current
         if (currentPath) {
           ws.send(JSON.stringify({ type: 'load', path: currentPath }))
+          ws.send(JSON.stringify({ type: 'play' }))
           lastSentPathRef.current = currentPath
           if (activePresetLabelRef.current) {
             setPresetName(activePresetLabelRef.current)
@@ -236,16 +327,57 @@ export const ProjectMPreviewPanel: React.FC<ProjectMPreviewPanelProps> = ({
     }
   }, [connectWebSocket])
 
-  // Load new preset when path changes
+  // Load new preset when local path or previewNonce changes (or when returning from OBS mode to local mode)
   useEffect(() => {
-    if (activePresetPath) {
+    if (!obsVideoMode) {
+      obsMirroredPathRef.current = null
+      if (activePresetPath) {
+        lastSentPathRef.current = activePresetPath
+        sendCommand({ type: 'load', path: activePresetPath })
+        if (!isCollapsed) {
+          setIsPlaying(true)
+          sendCommand({ type: 'play' })
+        }
+        if (activePresetLabel) {
+          setPresetName(activePresetLabel)
+        }
+      }
+    } else if (activePresetPath && !obsQueue?.current?.asset) {
+      // Optimistically load the clicked preset immediately while waiting for OBS status poll
       lastSentPathRef.current = activePresetPath
       sendCommand({ type: 'load', path: activePresetPath })
+      if (!isCollapsed) {
+        sendCommand({ type: 'play' })
+      }
       if (activePresetLabel) {
         setPresetName(activePresetLabel)
       }
     }
-  }, [activePresetPath, activePresetLabel, sendCommand])
+  }, [activePresetPath, activePresetLabel, previewNonce, obsVideoMode, isCollapsed, sendCommand])
+
+  // When OB Remote LED is ON, mirror the active preset playing in OBS Curationist Visualizer
+  const obsCurrentAsset = obsQueue?.current?.asset || obsQueue?.stopped?.asset || ''
+  useEffect(() => {
+    if (!obsVideoMode || !obsCurrentAsset) return
+    let cancelled = false
+    void window.curationist
+      .resolveObsPublishedAssetPath(obsCurrentAsset)
+      .then((resolvedPath) => {
+        if (cancelled || !resolvedPath) return
+        obsMirroredPathRef.current = resolvedPath
+        if (lastSentPathRef.current !== resolvedPath) {
+          lastSentPathRef.current = resolvedPath
+          sendCommand({ type: 'load', path: resolvedPath })
+          if (!isCollapsed) {
+            sendCommand({ type: 'play' })
+          }
+        }
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [obsVideoMode, obsCurrentAsset, isCollapsed, sendCommand])
 
   // Pause when collapsed to save GPU cycles, resume when expanded
   useEffect(() => {
@@ -284,11 +416,48 @@ export const ProjectMPreviewPanel: React.FC<ProjectMPreviewPanelProps> = ({
   }, [sendCommand])
 
   const handleTogglePlay = () => {
+    if (obsVideoMode) {
+      const nextAction = obsStatus?.state === 'playing' ? 'pause' : 'play'
+      void sendObsVideoCommand(nextAction)
+      return
+    }
     const next = !isPlaying
     setIsPlaying(next)
     sendCommand({ type: next ? 'play' : 'pause' })
     onNotify?.(next ? 'projectM visualizer resumed' : 'projectM visualizer paused')
   }
+
+  const handlePrev = () => {
+    if (obsVideoMode) {
+      void sendObsVideoCommand('previous')
+      return
+    }
+    onPrevPreset?.()
+  }
+
+  const handleNext = () => {
+    if (obsVideoMode) {
+      void sendObsVideoCommand('next')
+      return
+    }
+    onNextPreset?.()
+  }
+
+  const handleSetPlayToggle = () => {
+    if (obsVideoMode) {
+      const nextAction = obsStatus?.state === 'playing' ? 'pause' : 'play'
+      void sendObsVideoCommand(nextAction)
+      return
+    }
+    onTogglePlaylistPlay?.()
+  }
+
+  const obsActivePresetTitle = obsQueue?.current?.title || obsQueue?.stopped?.title || null
+  const displayedPresetName =
+    obsVideoMode && obsActivePresetTitle
+      ? `OBS: ${obsActivePresetTitle}`
+      : presetName
+  const effectiveIsPlaying = obsVideoMode ? obsStatus?.state === 'playing' : isPlaying
 
   const handleToggleLock = () => {
     const next = !isLocked
@@ -429,11 +598,19 @@ export const ProjectMPreviewPanel: React.FC<ProjectMPreviewPanelProps> = ({
                 textOverflow: 'ellipsis',
                 whiteSpace: 'nowrap'
               }}
-              title={presetName}
+              title={displayedPresetName}
             >
-              {presetName}
+              {displayedPresetName}
             </span>
-            {isPlaylistPlaying && playingPlaylistName && (
+            {obsVideoMode && (
+              <span
+                className="badge synced"
+                style={{ fontSize: 9.5, padding: '0 5px', flexShrink: 0 }}
+              >
+                OBS {(obsStatus?.state || 'IDLE').toUpperCase()}
+              </span>
+            )}
+            {!obsVideoMode && isPlaylistPlaying && playingPlaylistName && (
               <span
                 className="badge synced"
                 style={{ fontSize: 9.5, padding: '0 5px', flexShrink: 0 }}
@@ -481,44 +658,74 @@ export const ProjectMPreviewPanel: React.FC<ProjectMPreviewPanelProps> = ({
           fontSize: 11
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+          {onToggleObsVideoMode && (
+            <ObsLedToggle
+              active={obsVideoMode}
+              connected={Boolean(obsConnection?.connected)}
+              kind="video"
+              onToggle={onToggleObsVideoMode}
+              onOpenSettings={() => setShowObsVideoSettings(true)}
+            />
+          )}
+
           <button
             className="icon-btn"
-            disabled={!hasPrevPreset}
-            onClick={onPrevPreset}
-            title="Previous Preset in Playlist"
+            disabled={obsVideoMode ? !obsConnection?.connected : !hasPrevPreset}
+            onClick={handlePrev}
+            title={obsVideoMode ? 'Previous Preset in OBS' : 'Previous Preset in Playlist'}
           >
             <SkipBack size={12} />
           </button>
           <button
             className="icon-btn accent"
             onClick={handleTogglePlay}
-            title={isPlaying ? 'Pause Visualizer Rendering' : 'Resume Visualizer Rendering'}
+            title={
+              obsVideoMode
+                ? effectiveIsPlaying
+                  ? 'Pause OBS Preset Visualizer'
+                  : 'Play OBS Preset Visualizer'
+                : effectiveIsPlaying
+                  ? 'Pause Visualizer Rendering'
+                  : 'Resume Visualizer Rendering'
+            }
           >
-            {isPlaying ? <Pause size={12} /> : <Play size={12} />}
+            {effectiveIsPlaying ? <Pause size={12} /> : <Play size={12} />}
           </button>
           <button
             className="icon-btn"
-            disabled={!hasNextPreset}
-            onClick={onNextPreset}
-            title="Next Preset in Playlist"
+            disabled={obsVideoMode ? !obsConnection?.connected : !hasNextPreset}
+            onClick={handleNext}
+            title={obsVideoMode ? 'Next Preset in OBS' : 'Next Preset in Playlist'}
           >
             <SkipForward size={12} />
           </button>
 
           {onTogglePlaylistPlay && (
             <button
-              className={`vscode-btn ${isPlaylistPlaying ? 'primary' : ''}`}
+              className={`vscode-btn ${
+                (obsVideoMode ? effectiveIsPlaying : isPlaylistPlaying) ? 'primary' : ''
+              }`}
               style={{ height: 20, padding: '0 6px', fontSize: 10.5, marginLeft: 2 }}
-              onClick={onTogglePlaylistPlay}
+              onClick={handleSetPlayToggle}
               title={
-                isPlaylistPlaying
-                  ? 'Stop Auto-Playing Preset Playlist'
-                  : 'Auto-Play Selected Preset Playlist'
+                obsVideoMode
+                  ? 'Play or Pause Preset Queue in OBS'
+                  : isPlaylistPlaying
+                    ? 'Stop Auto-Playing Preset Playlist'
+                    : 'Auto-Play Selected Preset Playlist'
               }
             >
-              {isPlaylistPlaying ? <Square size={10} /> : <ListVideo size={11} />}
-              <span>{isPlaylistPlaying ? 'Stop Set' : 'Play Set'}</span>
+              {(obsVideoMode ? effectiveIsPlaying : isPlaylistPlaying) ? (
+                <Square size={10} />
+              ) : (
+                <ListVideo size={11} />
+              )}
+              <span>
+                {(obsVideoMode ? effectiveIsPlaying : isPlaylistPlaying)
+                  ? 'Stop Set'
+                  : 'Play Set'}
+              </span>
             </button>
           )}
         </div>
@@ -538,6 +745,16 @@ export const ProjectMPreviewPanel: React.FC<ProjectMPreviewPanelProps> = ({
                 onChange={(e) => {
                   const val = Math.max(3, Math.min(600, Number(e.target.value) || 15))
                   onChangePresetDurationSec(val)
+                  if (obsVideoMode && obsConnection?.connected && activeObsVideoSourceId) {
+                    void window.curationist
+                      .setObsPresetTiming(
+                        activeObsVideoSourceId,
+                        val * 1000,
+                        obsStatus?.autoAdvance ?? true
+                      )
+                      .then(setObsStatus)
+                      .catch(() => {})
+                  }
                 }}
                 className="vscode-input"
                 style={{ width: 44, height: 20, padding: '0 4px', fontSize: 10.5, textAlign: 'center' }}
@@ -573,6 +790,16 @@ export const ProjectMPreviewPanel: React.FC<ProjectMPreviewPanelProps> = ({
           </button>
         </div>
       </div>
+
+      {showObsVideoSettings && obsConnection && (
+        <ObsVideoSettingsModal
+          sourceId={activeObsVideoSourceId}
+          sources={obsConnection.sources}
+          onSelectSourceId={(id) => onSelectObsVideoSourceId?.(id)}
+          onClose={() => setShowObsVideoSettings(false)}
+          onNotify={(msg) => onNotify?.(msg)}
+        />
+      )}
     </div>
   )
 }

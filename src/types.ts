@@ -1,4 +1,8 @@
-export type WorkspaceMode = 'music' | 'presets'
+export type WorkspaceMode = 'music' | 'video' | 'presets'
+
+export type ObsSourceKind = 'audio' | 'clip' | 'video'
+
+export type ObsQueuePublishMode = 'play_now' | 'play_next' | 'append' | 'replace'
 
 export type SidebarSide = 'left' | 'right'
 
@@ -19,20 +23,169 @@ export interface ManagedStorageFolder {
 
 export interface AppSettings {
   mp3ManagedStoragePath: string
+  videoManagedStoragePath?: string
   presetManagedStoragePath: string
   nowPlaylistingJsonPath: string
   obspiltMilkLibraryJsonPath: string
   obspiltMilkPlaylistDatPath: string
   milkdropExecutablePath: string
   copyMp3ToManagedByDefault: boolean
+  copyVideoToManagedByDefault?: boolean
   copyPresetToManagedByDefault: boolean
   playlistDatUseManagedPaths: boolean
   managedStorageFolders: ManagedStorageFolder[]
   selectedMp3StorageFolderId: string
+  selectedVideoStorageFolderId?: string
   selectedPresetStorageFolderId: string
   mp3ManagedTransferMode: 'copy' | 'move'
+  videoManagedTransferMode?: 'copy' | 'move'
   presetManagedTransferMode: 'copy' | 'move'
   presetPlaylistDurationSec: number
+  obsWebsocketUrl?: string
+  obsWebsocketPassword?: string
+  selectedObsAudioSourceId?: string
+  selectedObsClipSourceId?: string
+  selectedObsVideoSourceId?: string
+  obsExecutablePath?: string
+  obsPersistentConnect?: boolean
+  showSetupWizardOnStartup?: boolean
+  setupWizardCompleted?: boolean
+}
+
+export interface ObsCapabilities {
+  protocolVersion: number
+  productVersion: string
+  audioDecoding: boolean
+  albumArt: boolean
+  projectM: boolean
+  seekReceipts: boolean
+}
+
+export interface ObsSource {
+  sourceId: string
+  name: string
+  kind: ObsSourceKind
+}
+
+export interface ObsConnectionState {
+  connected: boolean
+  sessionId: string | null
+  endpoint: string
+  capabilities: ObsCapabilities | null
+  sources: ObsSource[]
+}
+
+export interface ObsStatus {
+  sourceId: string
+  kind: ObsSourceKind
+  revision: number
+  state: 'stopped' | 'playing' | 'paused' | 'holding' | 'buffering' | 'error'
+  playbackEpoch: number
+  settledSeekEpoch: number
+  activeEntryId: string | null
+  activeMediaId: string | null
+  cursorMs: number
+  durationMs: number
+  remaining: number
+  seeking: boolean
+  transitionPending: boolean
+  loop: boolean
+  shuffle: boolean
+  autoAdvance: boolean
+  advanceOnSongChange?: boolean
+  crossfadeSec?: number
+  presetIntervalMs: number
+  error: string
+  audioReady: boolean
+  visualReady: boolean
+  audioDriverId: string
+  audioDriverReady: boolean
+  drivenAudioFrames: number
+}
+
+export interface ObsQueueItem {
+  entryId: string
+  mediaId: string
+  asset: string
+  title: string
+  artist: string
+  durationMs: number | null
+  artwork?: string
+}
+
+export interface ObsQueue {
+  sourceId: string
+  kind: ObsSourceKind
+  revision: number
+  playbackEpoch: number
+  current: ObsQueueItem | null
+  upcoming: ObsQueueItem[]
+  stopped: ObsQueueItem | null
+  playable: boolean
+}
+
+export interface ObsAudioSettings {
+  sourceId: string
+  brightness: number
+  contrast: number
+  saturation: number
+  glowColor: number
+  glowSize: number
+  glowIntensity: number
+  vignetteStrength: number
+  vignetteRoundness: number
+  bounce: number
+  shake: number
+  crossfadeSec?: number
+}
+
+export interface ObsVideoSettings {
+  sourceId: string
+  width: number
+  height: number
+  fps: number
+  transitionMs: number
+  audioDriverId: string
+}
+
+export interface ObsAudioDriver {
+  sourceId: string
+  name: string
+  type: 'source' | 'scene'
+}
+
+export type ObsControlPayload =
+  | {
+      action: 'play' | 'pause' | 'stop' | 'restart' | 'next' | 'previous'
+      sourceId: string
+    }
+  | {
+      action: 'seek'
+      sourceId: string
+      cursorMs: number
+      expectedEpoch?: number
+      expectedMediaId?: string
+    }
+
+export interface ObsPluginStatus {
+  payloadVersion: string | null
+  installedVersion: string | null
+  installedHealthy: boolean
+  destination: string
+  obs: {
+    path: string
+    version: string
+    compatible: boolean
+  } | null
+  obsRunning: boolean
+  message: string
+}
+
+export interface ObsPluginInstallResult {
+  version: string
+  destination: string
+  backupPath: string | null
+  restartRequired: boolean
 }
 
 export interface PreviewPresetResult {
@@ -84,11 +237,47 @@ export interface Mp3Track {
   duration: number
   bitrate: number
   sampleRate: number
+  rating: number
+  hasSyncedLyrics?: boolean
+  syncedLyricsFirstLine?: string
+  syncedLyrics?: string
+  unsyncedLyrics?: string
+  comment?: string
+  channels?: number
+  codec?: string
+  fileSize?: number
   showTags: boolean
   coverArtMime?: string
   coverArtBase64?: string
   fileExists: boolean
   addedAt: string
+}
+
+export interface Mp3DetailedMetadata {
+  trackId: string
+  filePath: string
+  artist: string
+  title: string
+  album: string
+  year: string
+  genre: string
+  trackNumber: string
+  rating: number
+  rawRatingTag: string
+  rawStarsTag: string
+  duration: number
+  bitrate: number
+  sampleRate: number
+  channels: number
+  codec: string
+  tagTypes: string
+  fileSize: number
+  addedAt: string
+  comment: string
+  unsyncedLyrics: string
+  syncedLyrics: string
+  hasSyncedLyrics: boolean
+  syncedLyricsFirstLine: string
 }
 
 export interface Mp3TagUpdatePayload {
@@ -99,6 +288,10 @@ export interface Mp3TagUpdatePayload {
   year?: string
   genre?: string
   trackNumber?: string
+  rating?: number
+  comment?: string
+  unsyncedLyrics?: string
+  syncedLyrics?: string
   showTags?: boolean
   coverArtBase64?: string | null
   coverArtMime?: string | null
@@ -115,6 +308,7 @@ export interface MusicPlaylistItem {
   title: string
   album?: string
   duration?: number
+  rating?: number
   show_tags: boolean
   uuid: string
   fileExists?: boolean
@@ -222,4 +416,61 @@ export interface PresetInspectionResult {
   warnings: string[]
   originalContent: string
   repairedContent: string
+}
+
+export interface VideoLibraryRecord {
+  id: string
+  name: string
+  description: string
+  clipCount: number
+  createdAt: string
+}
+
+export interface VideoClipItem {
+  id: string
+  libraryId: string
+  libraryName?: string
+  filePath: string
+  originalPath: string
+  isManaged: boolean
+  filename: string
+  title: string
+  artist: string
+  duration: number
+  fileSize: number
+  rating: number
+  fileExists: boolean
+  addedAt: string
+}
+
+export interface VideoPlaylistItem {
+  id: string
+  playlistId: string
+  clipId: string | null
+  position: number
+  value: string // file path
+  title: string
+  artist: string
+  duration: number
+  rating: number
+  fileExists: boolean
+}
+
+export interface VideoPlaylist {
+  id: string
+  name: string
+  sourceOrigin: string
+  isActive: boolean
+  itemCount: number
+  updatedAt: string
+  items?: VideoPlaylistItem[]
+}
+
+export interface VideoWorkspaceState {
+  libraries: VideoLibraryRecord[]
+  clips: VideoClipItem[]
+  playlists: VideoPlaylist[]
+  activePlaylistId: string | null
+  isModified: boolean
+  lastPublishedAt: string | null
 }

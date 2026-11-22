@@ -11,7 +11,7 @@ import {
 import type { AppSettings, ManagedStorageFolder } from '../types'
 
 interface ManagedStorageSelectorProps {
-  domain: 'music' | 'presets'
+  domain: 'music' | 'video' | 'presets'
   settings: AppSettings
   onUpdateSettings: (partial: Partial<AppSettings>) => Promise<AppSettings>
   onNotify: (msg: string) => void
@@ -31,21 +31,30 @@ export const ManagedStorageSelector: React.FC<ManagedStorageSelectorProps> = ({
   const selectedId =
     domain === 'music'
       ? settings.selectedMp3StorageFolderId
-      : settings.selectedPresetStorageFolderId
+      : domain === 'video'
+        ? settings.selectedVideoStorageFolderId
+        : settings.selectedPresetStorageFolderId
   const transferMode =
     domain === 'music'
       ? settings.mp3ManagedTransferMode || 'copy'
-      : settings.presetManagedTransferMode || 'copy'
+      : domain === 'video'
+        ? settings.videoManagedTransferMode || 'copy'
+        : settings.presetManagedTransferMode || 'copy'
 
   const activeFolder =
     folders.find((f) => f.id === selectedId) || folders[0] || null
 
   const handleSelectFolder = async (folderId: string) => {
+    const f = folders.find((item) => item.id === folderId)
     if (domain === 'music') {
-      const f = folders.find((item) => item.id === folderId)
       await onUpdateSettings({
         selectedMp3StorageFolderId: folderId,
         ...(f ? { mp3ManagedStoragePath: f.path } : {})
+      })
+    } else if (domain === 'video') {
+      await onUpdateSettings({
+        selectedVideoStorageFolderId: folderId,
+        ...(f ? { videoManagedStoragePath: f.path } : {})
       })
     } else {
       await onUpdateSettings({
@@ -57,6 +66,8 @@ export const ManagedStorageSelector: React.FC<ManagedStorageSelectorProps> = ({
   const handleSetTransferMode = async (mode: 'copy' | 'move') => {
     if (domain === 'music') {
       await onUpdateSettings({ mp3ManagedTransferMode: mode })
+    } else if (domain === 'video') {
+      await onUpdateSettings({ videoManagedTransferMode: mode })
     } else {
       await onUpdateSettings({ presetManagedTransferMode: mode })
     }
@@ -94,6 +105,9 @@ export const ManagedStorageSelector: React.FC<ManagedStorageSelectorProps> = ({
     if (domain === 'music') {
       partial.selectedMp3StorageFolderId = id
       partial.mp3ManagedStoragePath = folderPath
+    } else if (domain === 'video') {
+      partial.selectedVideoStorageFolderId = id
+      partial.videoManagedStoragePath = folderPath
     } else {
       partial.selectedPresetStorageFolderId = id
     }
@@ -123,6 +137,10 @@ export const ManagedStorageSelector: React.FC<ManagedStorageSelectorProps> = ({
     if (settings.selectedMp3StorageFolderId === id) {
       partial.selectedMp3StorageFolderId = nextFolders[0].id
       partial.mp3ManagedStoragePath = nextFolders[0].path
+    }
+    if (settings.selectedVideoStorageFolderId === id) {
+      partial.selectedVideoStorageFolderId = nextFolders[0].id
+      partial.videoManagedStoragePath = nextFolders[0].path
     }
     if (settings.selectedPresetStorageFolderId === id) {
       partial.selectedPresetStorageFolderId = nextFolders[0].id

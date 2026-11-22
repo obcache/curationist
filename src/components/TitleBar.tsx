@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { Minus, Square, X } from 'lucide-react'
+import pkg from '../../package.json'
 import { BrandLogo } from './BrandLogo'
 import type { WorkspaceMode } from '../types'
 
@@ -13,6 +14,7 @@ interface TitleBarProps {
   workspace: WorkspaceMode
   onSwitchWorkspace: (mode: WorkspaceMode) => void
   onOpenPreferences: () => void
+  onOpenSetupWizard?: () => void
   onResetLayout: () => void
   showOutputLog: boolean
   onToggleOutputLog: () => void
@@ -23,12 +25,16 @@ interface TitleBarProps {
   presetModified: boolean
   onPublishMusic: () => void
   onPublishPresets: () => void
+  onNewPresetInMilkLab: () => void
+  onEditSelectedPresetInMilkLab: () => void
+  canEditSelectedPreset?: boolean
 }
 
 export const TitleBar: React.FC<TitleBarProps> = ({
   workspace,
   onSwitchWorkspace,
   onOpenPreferences,
+  onOpenSetupWizard,
   onResetLayout,
   showOutputLog,
   onToggleOutputLog,
@@ -38,7 +44,10 @@ export const TitleBar: React.FC<TitleBarProps> = ({
   musicModified,
   presetModified,
   onPublishMusic,
-  onPublishPresets
+  onPublishPresets,
+  onNewPresetInMilkLab,
+  onEditSelectedPresetInMilkLab,
+  canEditSelectedPreset = false
 }) => {
   const [openMenu, setOpenMenu] = useState<'file' | 'view' | 'publish' | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
@@ -68,7 +77,7 @@ export const TitleBar: React.FC<TitleBarProps> = ({
               letterSpacing: 0
             }}
           >
-            v1.2.0
+            v{pkg.version}
           </span>
         </div>
 
@@ -82,6 +91,31 @@ export const TitleBar: React.FC<TitleBarProps> = ({
             </button>
             {openMenu === 'file' && (
               <div className="menu-dropdown">
+                <div className="menu-dropdown-header">milkLab Preset IDE</div>
+                <button
+                  className="menu-dropdown-item"
+                  onClick={() => {
+                    setOpenMenu(null)
+                    onNewPresetInMilkLab()
+                  }}
+                >
+                  <span>New Preset in milkLab...</span>
+                  <span className="menu-shortcut">Ctrl+N</span>
+                </button>
+                <button
+                  className="menu-dropdown-item"
+                  disabled={!canEditSelectedPreset}
+                  style={{ opacity: canEditSelectedPreset ? 1 : 0.45 }}
+                  onClick={() => {
+                    if (!canEditSelectedPreset) return
+                    setOpenMenu(null)
+                    onEditSelectedPresetInMilkLab()
+                  }}
+                >
+                  <span>Edit Selected Preset in milkLab...</span>
+                  <span className="menu-shortcut">Ctrl+E</span>
+                </button>
+                <div className="menu-dropdown-sep" />
                 <button
                   className="menu-dropdown-item"
                   onClick={() => {
@@ -92,6 +126,17 @@ export const TitleBar: React.FC<TitleBarProps> = ({
                   <span>Preferences...</span>
                   <span className="menu-shortcut">Ctrl+,</span>
                 </button>
+                {onOpenSetupWizard && (
+                  <button
+                    className="menu-dropdown-item"
+                    onClick={() => {
+                      setOpenMenu(null)
+                      onOpenSetupWizard()
+                    }}
+                  >
+                    <span>OBS Setup &amp; Connection Wizard...</span>
+                  </button>
+                )}
                 <div className="menu-dropdown-sep" />
                 <button
                   className="menu-dropdown-item"
@@ -144,9 +189,22 @@ export const TitleBar: React.FC<TitleBarProps> = ({
                 >
                   <div className="menu-dropdown-item-left">
                     <span className="menu-check">{workspace === 'music' ? '✓' : ''}</span>
-                    <span>nowPlaylisting (MP3 Workspace)</span>
+                    <span>Curationist Audio — MP3 Workspace</span>
                   </div>
                   <span className="menu-shortcut">Ctrl+1</span>
+                </button>
+                <button
+                  className="menu-dropdown-item"
+                  onClick={() => {
+                    setOpenMenu(null)
+                    onSwitchWorkspace('video')
+                  }}
+                >
+                  <div className="menu-dropdown-item-left">
+                    <span className="menu-check">{workspace === 'video' ? '✓' : ''}</span>
+                    <span>Curationist Video — Video Studio Workspace</span>
+                  </div>
+                  <span className="menu-shortcut">Ctrl+2</span>
                 </button>
                 <button
                   className="menu-dropdown-item"
@@ -157,9 +215,9 @@ export const TitleBar: React.FC<TitleBarProps> = ({
                 >
                   <div className="menu-dropdown-item-left">
                     <span className="menu-check">{workspace === 'presets' ? '✓' : ''}</span>
-                    <span>obSpiltMilk (Presets Workspace)</span>
+                    <span>Curationist Visualizer — projectM Presets Workspace</span>
                   </div>
-                  <span className="menu-shortcut">Ctrl+2</span>
+                  <span className="menu-shortcut">Ctrl+3</span>
                 </button>
 
                 <div className="menu-dropdown-sep" />
@@ -240,8 +298,10 @@ export const TitleBar: React.FC<TitleBarProps> = ({
       <div className="titlebar-center">
         <span>
           {workspace === 'music'
-            ? 'nowPlaylisting — MP3 Library & Multi-Playlist Studio'
-            : 'obSpiltMilk — projectM Preset Validation & Playlist Studio'}
+            ? 'Curationist Audio — MP3 Library & Multi-Playlist Studio'
+            : workspace === 'video'
+              ? 'Curationist Video — Video Clip Library & Playlist Studio'
+              : 'Curationist Visualizer — projectM Preset Validation & Playlist Studio'}
         </span>
         {(musicModified || presetModified) && (
           <span className="badge modified">Unpublished Draft Changes</span>

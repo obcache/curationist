@@ -14,7 +14,12 @@ import type {
   PresetLibraryRecord,
   PresetPlaylist,
   PresetPlaylistItem,
-  PresetWorkspaceState
+  PresetWorkspaceState,
+  VideoClipItem,
+  VideoLibraryRecord,
+  VideoPlaylist,
+  VideoPlaylistItem,
+  VideoWorkspaceState
 } from '../src/types'
 
 let db: DatabaseSync | null = null
@@ -54,6 +59,14 @@ let cachedPresetLibraryData: {
   libraries: PresetLibraryRecord[]
   presets: PresetItem[]
   presetById: Map<string, PresetItem>
+  ratingMap: Map<string, number>
+} | null = null
+
+let cachedVideoLibraryData: {
+  libraries: VideoLibraryRecord[]
+  clips: VideoClipItem[]
+  clipById: Map<string, VideoClipItem>
+  clipByPath: Map<string, VideoClipItem>
 } | null = null
 
 export function invalidateMusicLibraryCache(): void {
@@ -64,12 +77,77 @@ export function invalidatePresetLibraryCache(): void {
   cachedPresetLibraryData = null
 }
 
+export function invalidateVideoLibraryCache(): void {
+  cachedVideoLibraryData = null
+}
+
+/**
+ * Strips any stray leading ID3v2 APIC description bytes (e.g. "Cover\0") before the
+ * actual JPEG / PNG / GIF / WebP magic header so Windows WIC in OBS always decodes cleanly.
+ */
+export function sanitizeImageBuffer(buf: Buffer): Buffer {
+  if (buf.length < 12) return buf
+  const limit = Math.min(buf.length - 4, 64)
+  for (let i = 0; i <= limit; i++) {
+    // JPEG: FF D8 FF
+    if (buf[i] === 0xff && buf[i + 1] === 0xd8 && buf[i + 2] === 0xff) {
+      return i === 0 ? buf : buf.subarray(i)
+    }
+    // PNG: 89 50 4E 47
+    if (
+      buf[i] === 0x89 &&
+      buf[i + 1] === 0x50 &&
+      buf[i + 2] === 0x4e &&
+      buf[i + 3] === 0x47
+    ) {
+      return i === 0 ? buf : buf.subarray(i)
+    }
+    // GIF: 47 49 46 38 ("GIF8")
+    if (
+      buf[i] === 0x47 &&
+      buf[i + 1] === 0x49 &&
+      buf[i + 2] === 0x46 &&
+      buf[i + 3] === 0x38
+    ) {
+      return i === 0 ? buf : buf.subarray(i)
+    }
+    // WebP: "RIFF".... "WEBP"
+    if (
+      i + 11 < buf.length &&
+      buf[i] === 0x52 &&
+      buf[i + 1] === 0x49 &&
+      buf[i + 2] === 0x46 &&
+      buf[i + 3] === 0x46 &&
+      buf[i + 8] === 0x57 &&
+      buf[i + 9] === 0x45 &&
+      buf[i + 10] === 0x42 &&
+      buf[i + 11] === 0x50
+    ) {
+      return i === 0 ? buf : buf.subarray(i)
+    }
+  }
+  return buf
+}
+
 export function updatePresetRatingInMemoryCache(presetIds: string[], rating: number): void {
   if (!cachedPresetLibraryData) return
   const idSet = new Set(presetIds)
+  for (const id of idSet) {
+    cachedPresetLibraryData.ratingMap.set(id, rating)
+  }
   for (const p of cachedPresetLibraryData.presets) {
     if (idSet.has(p.id)) {
       p.rating = rating
+    }
+  }
+}
+
+export function updateMp3RatingInMemoryCache(trackIds: string[], rating: number): void {
+  if (!cachedMusicLibraryData) return
+  const idSet = new Set(trackIds)
+  for (const t of cachedMusicLibraryData.tracks) {
+    if (idSet.has(t.id)) {
+      t.rating = rating
     }
   }
 }
@@ -80,9 +158,10 @@ export function getTrackCoverArt(trackId: string): { mime: string; base64: strin
     .prepare(`SELECT cover_art_mime, cover_art_base64 FROM mp3_tracks WHERE id = ?`)
     .get(trackId) as { cover_art_mime: string; cover_art_base64: string } | undefined
   if (!row || !row.cover_art_base64) return null
+  const cleanBuf = sanitizeImageBuffer(Buffer.from(row.cover_art_base64, 'base64'))
   return {
     mime: row.cover_art_mime || 'image/jpeg',
-    base64: row.cover_art_base64
+    base64: cleanBuf.toString('base64')
   }
 }
 
@@ -100,6 +179,7 @@ export function getDefaultSettings(): AppSettings {
     'E:\\Desktop\\MilkDrop 3.33\\MilkDrop 3.exe'
 
   const defaultMp3Dir = path.join(home, 'Music', 'obs-managed')
+  const defaultVideoDir = path.join(home, 'Videos', 'obs-managed')
   const defaultPresetDir = path.join(
     appData,
     'obs-studio',
@@ -110,6 +190,7 @@ export function getDefaultSettings(): AppSettings {
 
   return {
     mp3ManagedStoragePath: defaultMp3Dir,
+    videoManagedStoragePath: defaultVideoDir,
     presetManagedStoragePath: defaultPresetDir,
     nowPlaylistingJsonPath: path.join(
       appData,
@@ -129,6 +210,7 @@ export function getDefaultSettings(): AppSettings {
     obspiltMilkPlaylistDatPath: 'C:\\Program Files\\obs-studio\\data\\obs-plugins\\obspiltMilk\\playlist.dat',
     milkdropExecutablePath: detectedMilkdrop,
     copyMp3ToManagedByDefault: false,
+    copyVideoToManagedByDefault: false,
     copyPresetToManagedByDefault: false,
     playlistDatUseManagedPaths: true,
     managedStorageFolders: [
@@ -138,16 +220,32 @@ export function getDefaultSettings(): AppSettings {
         path: defaultMp3Dir
       },
       {
+        id: 'default-video-storage',
+        label: 'Consolidated Video',
+        path: defaultVideoDir
+      },
+      {
         id: 'default-preset-storage',
         label: 'Consolidated Presets',
         path: path.join(home, 'Documents', 'MilkDrop Presets')
       }
     ],
     selectedMp3StorageFolderId: 'default-mp3-storage',
+    selectedVideoStorageFolderId: 'default-video-storage',
     selectedPresetStorageFolderId: 'default-preset-storage',
     mp3ManagedTransferMode: 'copy',
+    videoManagedTransferMode: 'copy',
     presetManagedTransferMode: 'copy',
-    presetPlaylistDurationSec: 15
+    presetPlaylistDurationSec: 15,
+    obsWebsocketUrl: 'ws://127.0.0.1:4455',
+    obsWebsocketPassword: '',
+    selectedObsAudioSourceId: '',
+    selectedObsClipSourceId: '',
+    selectedObsVideoSourceId: '',
+    obsExecutablePath: '',
+    obsPersistentConnect: true,
+    showSetupWizardOnStartup: true,
+    setupWizardCompleted: false
   }
 }
 
@@ -282,13 +380,118 @@ export function initDatabase(dbFilePath: string): DatabaseSync {
       rating INTEGER NOT NULL DEFAULT 0,
       updated_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS video_libraries (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS video_clips (
+      id TEXT PRIMARY KEY,
+      library_id TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      original_path TEXT NOT NULL,
+      is_managed INTEGER NOT NULL DEFAULT 0,
+      filename TEXT NOT NULL,
+      title TEXT NOT NULL DEFAULT '',
+      artist TEXT NOT NULL DEFAULT '',
+      duration REAL NOT NULL DEFAULT 0,
+      file_size INTEGER NOT NULL DEFAULT 0,
+      rating INTEGER NOT NULL DEFAULT 0,
+      added_at TEXT NOT NULL,
+      FOREIGN KEY (library_id) REFERENCES video_libraries(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_video_clips_filepath ON video_clips(file_path);
+    CREATE INDEX IF NOT EXISTS idx_video_clips_library ON video_clips(library_id);
+
+    CREATE TABLE IF NOT EXISTS video_playlists (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      source_origin TEXT NOT NULL DEFAULT 'curationist',
+      is_active INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS video_playlist_items (
+      id TEXT PRIMARY KEY,
+      playlist_id TEXT NOT NULL,
+      clip_id TEXT,
+      position INTEGER NOT NULL,
+      value TEXT NOT NULL,
+      title TEXT NOT NULL DEFAULT '',
+      artist TEXT NOT NULL DEFAULT '',
+      duration REAL NOT NULL DEFAULT 0,
+      rating INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY (playlist_id) REFERENCES video_playlists(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_video_playlist_items_pl ON video_playlist_items(playlist_id, position);
+
+    CREATE TABLE IF NOT EXISTS mp3_track_meta (
+      track_id TEXT PRIMARY KEY,
+      rating INTEGER NOT NULL DEFAULT 0,
+      added_at TEXT NOT NULL DEFAULT '',
+      synced_lyrics TEXT NOT NULL DEFAULT '',
+      unsynced_lyrics TEXT NOT NULL DEFAULT '',
+      comment TEXT NOT NULL DEFAULT '',
+      channels INTEGER NOT NULL DEFAULT 2,
+      codec TEXT NOT NULL DEFAULT 'MP3',
+      file_size INTEGER NOT NULL DEFAULT 0
+    );
   `)
+
+  // Backfill mp3_track_meta for any existing mp3_tracks without touching cover_art_base64 overflow pages
+  try {
+    const missingMetaRows = db
+      .prepare(
+        `SELECT t.id, t.file_path
+         FROM mp3_tracks t
+         LEFT JOIN mp3_track_meta tm ON tm.track_id = t.id
+         WHERE tm.track_id IS NULL`
+      )
+      .all() as Array<{ id: string; file_path: string }>
+    if (missingMetaRows.length > 0) {
+      const fallbackDate = new Date().toISOString()
+      const insertMeta = db.prepare(
+        `INSERT OR IGNORE INTO mp3_track_meta (track_id, rating, added_at, file_size) VALUES (?, 0, ?, ?)`
+      )
+      db.exec('BEGIN IMMEDIATE')
+      try {
+        for (const r of missingMetaRows) {
+          let addedAt = fallbackDate
+          let fSize = 0
+          try {
+            const st = fs.statSync(r.file_path)
+            fSize = st.size
+            const dt = st.birthtimeMs > 0 ? st.birthtime : st.mtime
+            addedAt = dt.toISOString()
+          } catch {
+            // use fallbackDate
+          }
+          insertMeta.run(r.id, addedAt, fSize)
+        }
+        db.exec('COMMIT')
+      } catch {
+        try {
+          db.exec('ROLLBACK')
+        } catch {
+          // ignore
+        }
+      }
+    }
+  } catch {
+    // ignore backfill error
+  }
 
   // Ensure default sync_state rows
   const insertSync = db.prepare(
     `INSERT OR IGNORE INTO sync_state (domain, is_modified, last_published_at) VALUES (?, 0, NULL)`
   )
   insertSync.run('music')
+  insertSync.run('video')
   insertSync.run('presets')
 
   // Ensure default libraries exist
@@ -298,8 +501,16 @@ export function initDatabase(dbFilePath: string): DatabaseSync {
   ).run('default-mp3-lib', 'General MP3 Library', 'Default logical library for MP3 tracks', now)
 
   db.prepare(
+    `INSERT OR IGNORE INTO video_libraries (id, name, description, created_at) VALUES (?, ?, ?, ?)`
+  ).run('default-video-lib', 'General Video Library', 'Default logical library for video clips', now)
+
+  db.prepare(
+    `INSERT OR IGNORE INTO video_playlists (id, name, source_origin, is_active, updated_at) VALUES (?, ?, ?, 1, ?)`
+  ).run('default-video-playlist', 'Main Video Playlist', 'curationist', now)
+
+  db.prepare(
     `INSERT OR IGNORE INTO preset_libraries (id, name, description, created_at) VALUES (?, ?, ?, ?)`
-  ).run('default-preset-lib', 'obSpiltMilk Library', 'Primary projectM / MilkDrop preset library', now)
+  ).run('default-preset-lib', 'Curationist Visualizer Library', 'Primary projectM / MilkDrop preset library', now)
 
   // Ensure default settings
   const defaults = getDefaultSettings()
@@ -363,7 +574,11 @@ export function updateSettings(partial: Partial<AppSettings>): AppSettings {
   return next
 }
 
-export function setDomainModified(domain: 'music' | 'presets', isModified: boolean, publishedNow = false): void {
+export function setDomainModified(
+  domain: 'music' | 'video' | 'presets',
+  isModified: boolean,
+  publishedNow = false
+): void {
   const d = getDb()
   if (publishedNow) {
     d.prepare(`UPDATE sync_state SET is_modified = ?, last_published_at = ? WHERE domain = ?`).run(
@@ -403,17 +618,26 @@ export function getMusicWorkspaceState(): MusicWorkspaceState {
       createdAt: r.created_at
     }))
 
-    // IMPORTANT: Do NOT select cover_art_base64 (or added_at after it) here!
-    // Selecting only columns 1..17 avoids reading 1.4+ GB of SQLite overflow pages
-    // and avoids serializing hundreds of MB of base64 over Electron IPC on every click.
+    // IMPORTANT: Do NOT select cover_art_base64 (or added_at after it) from mp3_tracks!
+    // Selecting only columns 1..17 from mp3_tracks and joining mp3_track_meta avoids reading
+    // 1.4+ GB of SQLite overflow pages and keeps library reads under 5ms.
     const trackRows = d
       .prepare(
         `SELECT t.id, t.library_id, t.file_path, t.original_path, t.is_managed,
                 t.filename, t.artist, t.title, t.album, t.year, t.genre,
                 t.track_number, t.duration, t.bitrate, t.sample_rate,
-                t.show_tags, t.cover_art_mime, l.name as library_name
+                t.show_tags, t.cover_art_mime, l.name as library_name,
+                COALESCE(tm.rating, 0) as rating,
+                COALESCE(tm.added_at, '') as meta_added_at,
+                COALESCE(tm.synced_lyrics, '') as synced_lyrics,
+                COALESCE(tm.unsynced_lyrics, '') as unsynced_lyrics,
+                COALESCE(tm.comment, '') as comment,
+                COALESCE(tm.channels, 2) as channels,
+                COALESCE(tm.codec, 'MP3') as codec,
+                COALESCE(tm.file_size, 0) as file_size
          FROM mp3_tracks t
          LEFT JOIN mp3_libraries l ON l.id = t.library_id
+         LEFT JOIN mp3_track_meta tm ON tm.track_id = t.id
          ORDER BY LOWER(t.artist) ASC, LOWER(t.title) ASC, LOWER(t.filename) ASC`
       )
       .all() as Array<any>
@@ -422,6 +646,13 @@ export function getMusicWorkspaceState(): MusicWorkspaceState {
     const trackById = new Map<string, Mp3Track>()
 
     const tracks: Mp3Track[] = trackRows.map((r) => {
+      const rawSynced = String(r.synced_lyrics || '').trim()
+      const firstLine = rawSynced
+        ? rawSynced
+            .split(/\r?\n/)
+            .map((l: string) => l.trim())
+            .find(Boolean) || ''
+        : ''
       const tr: Mp3Track = {
         id: r.id,
         libraryId: r.library_id,
@@ -439,11 +670,20 @@ export function getMusicWorkspaceState(): MusicWorkspaceState {
         duration: Number(r.duration || 0),
         bitrate: Number(r.bitrate || 0),
         sampleRate: Number(r.sample_rate || 0),
+        rating: Number(r.rating || 0),
+        hasSyncedLyrics: Boolean(rawSynced),
+        syncedLyricsFirstLine: firstLine,
+        syncedLyrics: rawSynced,
+        unsyncedLyrics: r.unsynced_lyrics || '',
+        comment: r.comment || '',
+        channels: Number(r.channels || 2),
+        codec: r.codec || 'MP3',
+        fileSize: Number(r.file_size || 0),
         showTags: Boolean(r.show_tags),
         coverArtMime: r.cover_art_mime || '',
         coverArtBase64: '',
         fileExists: checkFileExistsCached(r.file_path),
-        addedAt: ''
+        addedAt: r.meta_added_at || ''
       }
       trackById.set(tr.id, tr)
       trackByPath.set(tr.filePath.replace(/\\/g, '/').toLowerCase(), tr)
@@ -491,6 +731,7 @@ export function getMusicWorkspaceState(): MusicWorkspaceState {
       title: ir.title,
       album: matchedTrack?.album || '',
       duration: matchedTrack?.duration || 0,
+      rating: matchedTrack?.rating || 0,
       show_tags: Boolean(ir.show_tags),
       uuid: ir.uuid || crypto.randomUUID(),
       fileExists: matchedTrack ? matchedTrack.fileExists : checkFileExistsCached(ir.value)
@@ -608,11 +849,12 @@ export function getPresetWorkspaceState(): PresetWorkspaceState {
     cachedPresetLibraryData = {
       libraries,
       presets,
-      presetById
+      presetById,
+      ratingMap
     }
   }
 
-  const { libraries, presets, presetById } = cachedPresetLibraryData
+  const { libraries, presets, presetById, ratingMap } = cachedPresetLibraryData
 
   const plRows = d
     .prepare(
@@ -642,7 +884,7 @@ export function getPresetWorkspaceState(): PresetWorkspaceState {
       filename: matched?.filename || path.basename(ir.managed_path || ir.original_path),
       repairs: matched?.repairs || [],
       warnings: matched?.warnings || [],
-      rating: matched?.rating || 0,
+      rating: matched?.rating ?? ratingMap.get(ir.preset_id) ?? 0,
       fileExists: matched
         ? matched.fileExists
         : checkFileExistsCached(ir.managed_path) || checkFileExistsCached(ir.original_path)
@@ -676,6 +918,137 @@ export function getPresetWorkspaceState(): PresetWorkspaceState {
     lastPublishedAt: syncRow?.last_published_at || null,
     targetLibraryJsonPath: settings.obspiltMilkLibraryJsonPath,
     targetPlaylistDatPath: settings.obspiltMilkPlaylistDatPath
+  }
+}
+
+export function getVideoWorkspaceState(): VideoWorkspaceState {
+  const d = getDb()
+
+  const syncRow = d
+    .prepare(`SELECT is_modified, last_published_at FROM sync_state WHERE domain = 'video'`)
+    .get() as { is_modified: number; last_published_at: string | null } | undefined
+
+  if (!cachedVideoLibraryData) {
+    const libRows = d
+      .prepare(
+        `SELECT l.id, l.name, l.description, l.created_at, COUNT(c.id) as clip_count
+         FROM video_libraries l
+         LEFT JOIN video_clips c ON c.library_id = l.id
+         GROUP BY l.id
+         ORDER BY l.created_at ASC`
+      )
+      .all() as Array<any>
+
+    const libraries: VideoLibraryRecord[] = libRows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      description: r.description,
+      clipCount: Number(r.clip_count || 0),
+      createdAt: r.created_at
+    }))
+
+    const clipRows = d
+      .prepare(
+        `SELECT c.*, l.name as library_name
+         FROM video_clips c
+         LEFT JOIN video_libraries l ON l.id = c.library_id
+         ORDER BY LOWER(c.title) ASC, LOWER(c.filename) ASC`
+      )
+      .all() as Array<any>
+
+    const clipById = new Map<string, VideoClipItem>()
+    const clipByPath = new Map<string, VideoClipItem>()
+
+    const clips: VideoClipItem[] = clipRows.map((r) => {
+      const clip: VideoClipItem = {
+        id: r.id,
+        libraryId: r.library_id,
+        libraryName: r.library_name || 'Video Library',
+        filePath: r.file_path,
+        originalPath: r.original_path,
+        isManaged: Boolean(r.is_managed),
+        filename: r.filename,
+        title: r.title || r.filename,
+        artist: r.artist || '',
+        duration: Number(r.duration || 0),
+        fileSize: Number(r.file_size || 0),
+        rating: Number(r.rating || 0),
+        fileExists: checkFileExistsCached(r.file_path),
+        addedAt: r.added_at
+      }
+      clipById.set(clip.id, clip)
+      clipByPath.set(clip.filePath.replace(/\\/g, '/').toLowerCase(), clip)
+      return clip
+    })
+
+    cachedVideoLibraryData = {
+      libraries,
+      clips,
+      clipById,
+      clipByPath
+    }
+  }
+
+  const { libraries, clips, clipById, clipByPath } = cachedVideoLibraryData
+
+  const plRows = d
+    .prepare(
+      `SELECT p.*, COUNT(i.id) as item_count
+       FROM video_playlists p
+       LEFT JOIN video_playlist_items i ON i.playlist_id = p.id
+       GROUP BY p.id
+       ORDER BY CASE WHEN p.is_active = 1 THEN 0 ELSE 1 END, LOWER(p.name) ASC`
+    )
+    .all() as Array<any>
+
+  const itemRows = d
+    .prepare(`SELECT * FROM video_playlist_items ORDER BY playlist_id ASC, position ASC`)
+    .all() as Array<any>
+
+  const itemsByPl = new Map<string, VideoPlaylistItem[]>()
+  for (const ir of itemRows) {
+    const matched =
+      (ir.clip_id && clipById.get(ir.clip_id)) ||
+      clipByPath.get(String(ir.value || '').replace(/\\/g, '/').toLowerCase())
+    const item: VideoPlaylistItem = {
+      id: ir.id,
+      playlistId: ir.playlist_id,
+      clipId: matched?.id || ir.clip_id || null,
+      position: Number(ir.position),
+      value: matched?.filePath || ir.value,
+      title: matched?.title || ir.title || path.basename(ir.value),
+      artist: matched?.artist || ir.artist || '',
+      duration: matched?.duration || Number(ir.duration || 0),
+      rating: matched?.rating ?? Number(ir.rating || 0),
+      fileExists: matched ? matched.fileExists : checkFileExistsCached(ir.value)
+    }
+    const list = itemsByPl.get(ir.playlist_id) || []
+    list.push(item)
+    itemsByPl.set(ir.playlist_id, list)
+  }
+
+  const playlists: VideoPlaylist[] = plRows.map((p) => {
+    const plItems = itemsByPl.get(p.id) || []
+    return {
+      id: p.id,
+      name: p.name,
+      sourceOrigin: p.source_origin,
+      isActive: Boolean(p.is_active),
+      itemCount: plItems.length,
+      updatedAt: p.updated_at,
+      items: plItems
+    }
+  })
+
+  const activePl = playlists.find((p) => p.isActive) || playlists[0]
+
+  return {
+    libraries,
+    clips,
+    playlists,
+    activePlaylistId: activePl ? activePl.id : null,
+    isModified: Boolean(syncRow?.is_modified),
+    lastPublishedAt: syncRow?.last_published_at || null
   }
 }
 

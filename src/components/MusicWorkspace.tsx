@@ -17,8 +17,10 @@ import {
   Music,
   Play,
   Plus,
+  RefreshCw,
   RotateCcw,
   Save,
+  Star,
   Trash2,
   Upload,
   UploadCloud,
@@ -28,11 +30,13 @@ import { ContextMenu, type ContextMenuEntry } from './ContextMenu'
 import { DockableSection } from './DockableSection'
 import { extractNormalizedDir, FolderTreeFilter } from './FolderTreeFilter'
 import { ManagedStorageSelector } from './ManagedStorageSelector'
+import { useColumnOrder } from '../hooks/useColumnOrder'
 import { useResizableColumns } from '../hooks/useResizableColumns'
 import { useVirtualTable } from '../hooks/useVirtualTable'
 import type { PanelViewItem } from './TitleBar'
 import type {
   AppSettings,
+  Mp3DetailedMetadata,
   Mp3Track,
   MusicPlaylist,
   MusicPlaylistItem,
@@ -45,7 +49,7 @@ export const MUSIC_PANELS_DEF = [
   { id: 'mp3-libraries', label: 'MP3 Logical Libraries' },
   { id: 'known-playlists', label: 'All Known Playlists' },
   { id: 'id3-inspector', label: 'ID3 Tag & Cover Art Editor' },
-  { id: 'active-json', label: 'Active saved-playlists.json' }
+  { id: 'active-json', label: 'Active OBS Audio Playlist' }
 ]
 
 interface MusicWorkspaceProps {
@@ -53,8 +57,18 @@ interface MusicWorkspaceProps {
   settings: AppSettings
   onUpdateSettings: (partial: Partial<AppSettings>) => Promise<AppSettings>
   onStateChange: (next: MusicWorkspaceState) => void
-  onPlayTrack: (track: Mp3Track, queue?: Mp3Track[]) => void
+  onPlayTrack: (
+    track: Mp3Track,
+    queue?: Mp3Track[],
+    mode?: 'play_now' | 'play_next' | 'append'
+  ) => void
   playingTrackId?: string
+  focusTrackRequest?: {
+    trackId?: string
+    title?: string
+    artist?: string
+    nonce: number
+  } | null
   onNotify: (msg: string) => void
   layoutResetCounter: number
   onPanelsChange?: (panels: PanelViewItem[]) => void
@@ -105,6 +119,95 @@ function formatDuration(sec?: number): string {
   return `${mins}:${rem < 10 ? '0' : ''}${rem}`
 }
 
+function formatDateAdded(iso?: string): string {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return '—'
+  const yyyy = d.getFullYear()
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  const hh = String(d.getHours()).padStart(2, '0')
+  const min = String(d.getMinutes()).padStart(2, '0')
+  return `${yyyy}-${mm}-${dd} ${hh}:${min}`
+}
+
+function formatBytes(bytes?: number): string {
+  if (!bytes || bytes <= 0) return '—'
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`
+  return `${bytes} B`
+}
+
+const DEFAULT_MUSIC_LIB_COLS = [
+  'play',
+  'title',
+  'artist',
+  'album',
+  'rating',
+  'duration',
+  'addedAt',
+  'storage',
+  'filePath'
+] as const
+type MusicLibColKey = (typeof DEFAULT_MUSIC_LIB_COLS)[number]
+
+const DEFAULT_MUSIC_PL_COLS = [
+  'position',
+  'play',
+  'title',
+  'artist',
+  'rating',
+  'show_tags',
+  'value',
+  'dir'
+] as const
+type MusicPlColKey = (typeof DEFAULT_MUSIC_PL_COLS)[number]
+
+const Mp3StarRating: React.FC<{
+  rating: number
+  size?: number
+  onChange: (nextRating: number) => void
+}> = ({ rating, size = 13, onChange }) => {
+  const [hover, setHover] = useState<number | null>(null)
+  const displayRating = hover !== null ? hover : rating || 0
+
+  return (
+    <div
+      className="star-rating-cell"
+      onMouseLeave={() => setHover(null)}
+      onClick={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+    >
+      {[1, 2, 3, 4, 5].map((star) => {
+        const filled = star <= displayRating
+        return (
+          <button
+            key={star}
+            type="button"
+            className={`star-cell-btn ${filled ? 'filled' : ''}`}
+            onMouseEnter={() => setHover(star)}
+            title={
+              rating === star
+                ? `Clear rating (${star}★)`
+                : `Set rating to ${star} star${star > 1 ? 's' : ''} (updates Library & ID3 tags)`
+            }
+            onClick={(e) => {
+              e.stopPropagation()
+              onChange(rating === star ? 0 : star)
+            }}
+          >
+            <Star
+              size={size}
+              fill={filled ? '#f59e0b' : 'transparent'}
+              color={filled ? '#f59e0b' : '#52525b'}
+            />
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
 export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
   state,
   settings,
@@ -112,6 +215,7 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
   onStateChange,
   onPlayTrack,
   playingTrackId,
+  focusTrackRequest,
   onNotify,
   layoutResetCounter,
   onPanelsChange,
@@ -119,32 +223,68 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
 }) => {
   // Resizable columns for MP3 Library Table and Music Playlist Table
   const { widths: libColWidths, startResize: startLibColResize } = useResizableColumns(
-    'curationist:music-lib-cols:v1',
+    'curationist:music-lib-cols:v2',
     {
-      play: 40,
-      title: 230,
-      artist: 165,
-      album: 150,
-      duration: 68,
-      storage: 92,
-      filePath: 340
+      play: 38,
+      title: 215,
+      artist: 155,
+      album: 140,
+      rating: 104,
+      duration: 64,
+      addedAt: 124,
+      storage: 88,
+      filePath: 300
     },
-    { play: 34, title: 80, artist: 70, album: 70, duration: 52, storage: 72, filePath: 120 }
+    {
+      play: 34,
+      title: 80,
+      artist: 70,
+      album: 70,
+      rating: 86,
+      duration: 50,
+      addedAt: 95,
+      storage: 70,
+      filePath: 110
+    }
   )
 
   const { widths: plColWidths, startResize: startPlColResize } = useResizableColumns(
-    'curationist:music-pl-cols:v1',
+    'curationist:music-pl-cols:v2',
     {
-      position: 46,
-      play: 40,
-      title: 220,
-      artist: 175,
-      show_tags: 86,
-      value: 320,
-      dir: 44
+      position: 44,
+      play: 38,
+      title: 210,
+      artist: 165,
+      rating: 102,
+      show_tags: 82,
+      value: 290,
+      dir: 42
     },
-    { position: 36, play: 34, title: 80, artist: 70, show_tags: 64, value: 120, dir: 38 }
+    {
+      position: 36,
+      play: 34,
+      title: 80,
+      artist: 70,
+      rating: 86,
+      show_tags: 64,
+      value: 110,
+      dir: 38
+    }
   )
+
+  const {
+    columnOrder: libColOrder,
+    dragOverCol: dragOverLibCol,
+    getHeaderDragProps: getLibHeaderDragProps,
+    resetColumnOrder: resetLibColOrder
+  } = useColumnOrder<MusicLibColKey>('curationist:music-lib-col-order:v1', DEFAULT_MUSIC_LIB_COLS)
+
+  const {
+    columnOrder: plColOrder,
+    dragOverCol: dragOverPlCol,
+    getHeaderDragProps: getPlHeaderDragProps,
+    resetColumnOrder: resetPlColOrder
+  } = useColumnOrder<MusicPlColKey>('curationist:music-pl-col-order:v1', DEFAULT_MUSIC_PL_COLS)
 
   const [contextMenu, setContextMenu] = useState<{
     x: number
@@ -206,8 +346,10 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
       setSections(DEFAULT_SECTIONS)
       localStorage.setItem(MUSIC_SECTIONS_STORAGE_KEY, JSON.stringify(DEFAULT_SECTIONS))
       updateCenterTopRatio(0.52)
+      resetLibColOrder()
+      resetPlColOrder()
     }
-  }, [layoutResetCounter])
+  }, [layoutResetCounter, resetLibColOrder, resetPlColOrder])
 
   const updateSections = (updater: (prev: SectionLayoutState[]) => SectionLayoutState[]) => {
     setSections((prev) => {
@@ -305,10 +447,19 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null)
   const [includeSubfolders, setIncludeSubfolders] = useState<boolean>(true)
   const [librarySearch, setLibrarySearch] = useState('')
+  const [ratingFilter, setRatingFilter] = useState<'all' | 'rated' | '5star' | '4plus' | '3plus'>('all')
   const [copyOnImport, setCopyOnImport] = useState(settings.copyMp3ToManagedByDefault)
 
-  type LibrarySortCol = 'title' | 'artist' | 'album' | 'duration' | 'storage' | 'filePath'
-  type PlaylistSortCol = 'position' | 'title' | 'artist' | 'show_tags' | 'value'
+  type LibrarySortCol =
+    | 'title'
+    | 'artist'
+    | 'album'
+    | 'rating'
+    | 'duration'
+    | 'addedAt'
+    | 'storage'
+    | 'filePath'
+  type PlaylistSortCol = 'position' | 'title' | 'artist' | 'rating' | 'show_tags' | 'value'
 
   const [libSort, setLibSort] = useState<{ col: LibrarySortCol | null; dir: 'asc' | 'desc' }>({
     col: null,
@@ -410,6 +561,11 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
           return false
         }
       }
+      const r = t.rating || 0
+      if (ratingFilter === 'rated' && r === 0) return false
+      if (ratingFilter === '5star' && r < 5) return false
+      if (ratingFilter === '4plus' && r < 4) return false
+      if (ratingFilter === '3plus' && r < 3) return false
       if (!q) return true
       return (
         t.title.toLowerCase().includes(q) ||
@@ -436,8 +592,14 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
         case 'album':
           cmp = (a.album || '').localeCompare(b.album || '', undefined, { sensitivity: 'base' })
           break
+        case 'rating':
+          cmp = (a.rating || 0) - (b.rating || 0)
+          break
         case 'duration':
           cmp = (a.duration || 0) - (b.duration || 0)
+          break
+        case 'addedAt':
+          cmp = (a.addedAt || '').localeCompare(b.addedAt || '')
           break
         case 'storage': {
           const rankA = !a.fileExists ? 0 : a.isManaged ? 2 : 1
@@ -452,7 +614,7 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
       return cmp * dirMul
     })
     return sorted
-  }, [libraryScopedTracks, selectedFolder, includeSubfolders, librarySearch, libSort])
+  }, [libraryScopedTracks, selectedFolder, includeSubfolders, librarySearch, ratingFilter, libSort])
 
   const selectedPlaylist: MusicPlaylist | null = useMemo(
     () => state.playlists.find((p) => p.id === selectedPlaylistId) || null,
@@ -476,6 +638,9 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
         case 'artist':
           cmp = (a.artist || '').localeCompare(b.artist || '', undefined, { sensitivity: 'base' })
           break
+        case 'rating':
+          cmp = (a.rating || 0) - (b.rating || 0)
+          break
         case 'show_tags':
           cmp = Number(a.show_tags) - Number(b.show_tags)
           break
@@ -491,12 +656,87 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
   const libVirtual = useVirtualTable(filteredTracks.length, 26, 24)
   const plVirtual = useVirtualTable(sortedPlaylistItems.length, 26, 24)
 
+  const pendingFocusTrackIdRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (!focusTrackRequest) return
+    const { trackId, title, artist } = focusTrackRequest
+    let found: Mp3Track | undefined
+    if (trackId) {
+      found = state.tracks.find((t) => t.id === trackId)
+    }
+    if (!found && title) {
+      const tNorm = title.trim().toLowerCase()
+      const aNorm = (artist || '').trim().toLowerCase()
+      if (aNorm) {
+        found = state.tracks.find(
+          (t) =>
+            (t.title || t.filename).trim().toLowerCase() === tNorm &&
+            (t.artist || '').trim().toLowerCase() === aNorm
+        )
+      }
+      if (!found) {
+        found = state.tracks.find(
+          (t) =>
+            (t.title || '').trim().toLowerCase() === tNorm ||
+            t.filename.trim().toLowerCase() === tNorm ||
+            t.filename.replace(/\.[^.]+$/, '').trim().toLowerCase() === tNorm
+        )
+      }
+    }
+    if (!found) {
+      onNotify(`Could not locate "${title || trackId || 'track'}" in MP3 library`)
+      return
+    }
+    if (centerTab !== 'split' && centerTab !== 'library') {
+      setCenterTab('split')
+    }
+    setSelectedTrackIds([found.id])
+    setLastClickedTrackId(found.id)
+    pendingFocusTrackIdRef.current = found.id
+
+    const alreadyVisible = filteredTracks.some((t) => t.id === found!.id)
+    if (!alreadyVisible) {
+      setSelectedLibraryId('all')
+      setSelectedFolder(null)
+      setLibrarySearch('')
+      setRatingFilter('all')
+    } else {
+      const idx = filteredTracks.findIndex((t) => t.id === found!.id)
+      const container = libVirtual.containerRef.current
+      if (container && idx >= 0) {
+        const targetTop = Math.max(0, idx * 26 - container.clientHeight / 2 + 13)
+        container.scrollTo({ top: targetTop, behavior: 'smooth' })
+        container.focus({ preventScroll: true })
+        pendingFocusTrackIdRef.current = null
+      }
+    }
+  }, [focusTrackRequest?.nonce])
+
+  useEffect(() => {
+    const targetId = pendingFocusTrackIdRef.current
+    if (!targetId) return
+    const idx = filteredTracks.findIndex((t) => t.id === targetId)
+    const container = libVirtual.containerRef.current
+    if (container && idx >= 0) {
+      const targetTop = Math.max(0, idx * 26 - container.clientHeight / 2 + 13)
+      container.scrollTo({ top: targetTop, behavior: 'smooth' })
+      container.focus({ preventScroll: true })
+      pendingFocusTrackIdRef.current = null
+    }
+  }, [filteredTracks, centerTab])
+
   const activeJsonPlaylists: MusicPlaylist[] = useMemo(
     () =>
       state.playlists
         .filter((p) => p.inActiveJson)
         .sort((a, b) => a.activeOrder - b.activeOrder),
     [state.playlists]
+  )
+
+  const activeObsPlaylist: MusicPlaylist | null = useMemo(
+    () => activeJsonPlaylists[0] || state.playlists[0] || null,
+    [activeJsonPlaylists, state.playlists]
   )
 
   // Inspector track(s)
@@ -528,12 +768,19 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
     year: '',
     genre: '',
     trackNumber: '',
+    rating: 0,
+    comment: '',
+    syncedLyrics: '',
+    unsyncedLyrics: '',
     showTags: true,
     coverArtMime: '' as string | null,
     coverArtBase64: '' as string | null,
     coverArtDirty: false,
     writeToFile: true
   })
+  const [inspectedDetail, setInspectedDetail] = useState<Mp3DetailedMetadata | null>(null)
+  const [syncedLyricsModalOpen, setSyncedLyricsModalOpen] = useState(false)
+  const [syncedLyricsDraft, setSyncedLyricsDraft] = useState('')
 
   useEffect(() => {
     let cancelled = false
@@ -546,12 +793,38 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
         year: t.year,
         genre: t.genre,
         trackNumber: t.trackNumber,
+        rating: t.rating || 0,
+        comment: t.comment || '',
+        syncedLyrics: t.syncedLyrics || '',
+        unsyncedLyrics: t.unsyncedLyrics || '',
         showTags: t.showTags,
         coverArtMime: t.coverArtMime || '',
         coverArtBase64: t.coverArtBase64 || '',
         coverArtDirty: false,
         writeToFile: true
       })
+      setInspectedDetail(null)
+      if (window.curationist?.inspectMp3TrackMetadata) {
+        window.curationist
+          .inspectMp3TrackMetadata(t.id)
+          .then((res) => {
+            if (cancelled || !res.detail) return
+            setInspectedDetail(res.detail)
+            onStateChange(res.state)
+            setTagForm((prev) => ({
+              ...prev,
+              album: prev.album || res.detail!.album,
+              year: prev.year || res.detail!.year,
+              genre: prev.genre || res.detail!.genre,
+              trackNumber: prev.trackNumber || res.detail!.trackNumber,
+              rating: res.detail!.rating,
+              comment: res.detail!.comment,
+              syncedLyrics: res.detail!.syncedLyrics,
+              unsyncedLyrics: res.detail!.unsyncedLyrics
+            }))
+          })
+          .catch(() => {})
+      }
       if (t.coverArtMime && !t.coverArtBase64 && window.curationist?.getTrackCoverArt) {
         window.curationist.getTrackCoverArt(t.id).then((art) => {
           if (!cancelled && art) {
@@ -564,11 +837,13 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
         })
       }
     } else if (inspectedTracks.length > 1) {
+      setInspectedDetail(null)
       const first = inspectedTracks[0]
       const sameArtist = inspectedTracks.every((t) => t.artist === first.artist)
       const sameAlbum = inspectedTracks.every((t) => t.album === first.album)
       const sameYear = inspectedTracks.every((t) => t.year === first.year)
       const sameGenre = inspectedTracks.every((t) => t.genre === first.genre)
+      const sameRating = inspectedTracks.every((t) => (t.rating || 0) === (first.rating || 0))
       setTagForm({
         artist: sameArtist ? first.artist : '',
         title: '',
@@ -576,6 +851,10 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
         year: sameYear ? first.year : '',
         genre: sameGenre ? first.genre : '',
         trackNumber: '',
+        rating: sameRating ? first.rating || 0 : 0,
+        comment: '',
+        syncedLyrics: '',
+        unsyncedLyrics: '',
         showTags: first.showTags,
         coverArtMime: first.coverArtMime || '',
         coverArtBase64: first.coverArtBase64 || '',
@@ -593,6 +872,8 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
           }
         })
       }
+    } else {
+      setInspectedDetail(null)
     }
     return () => {
       cancelled = true
@@ -683,6 +964,7 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
             duration: 0,
             bitrate: 0,
             sampleRate: 0,
+            rating: it.rating || 0,
             showTags: it.show_tags,
             coverArtMime: undefined,
             coverArtBase64: undefined,
@@ -881,6 +1163,87 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
     onStateChange(next)
   }
 
+  const handleSetMp3Rating = useCallback(
+    async (trackIds: string[], rating: number) => {
+      if (trackIds.length === 0) return
+      try {
+        const res = await window.curationist.setMp3TracksRating(trackIds, rating)
+        onStateChange(res.state)
+        if (inspectedTracks.some((t) => trackIds.includes(t.id))) {
+          setTagForm((prev) => ({ ...prev, rating }))
+          setInspectedDetail((prev) => (prev ? { ...prev, rating } : prev))
+        }
+        onNotify(
+          `Set rating to ${rating}★ for ${res.updated} MP3 track(s) (saved to Library & ID3 tags)`
+        )
+      } catch (err: any) {
+        onNotify(`Failed to update MP3 rating: ${err?.message || String(err)}`)
+      }
+    },
+    [inspectedTracks, onStateChange, onNotify]
+  )
+
+  const handleRefreshMp3Metadata = useCallback(
+    async (trackIdsToRefresh?: string[]) => {
+      setBusy(true)
+      const targets =
+        trackIdsToRefresh && trackIdsToRefresh.length > 0
+          ? trackIdsToRefresh
+          : selectedTrackIds.length > 0
+            ? selectedTrackIds
+            : filteredTracks.map((t) => t.id)
+      onNotify(
+        `Refreshing ID3 metadata & ratings (<RATING>/<STARS>, <SYNCED LYRICS>, duration, sample rate) for ${targets.length} track(s)...`
+      )
+      try {
+        const res = await window.curationist.refreshMp3Metadata(targets)
+        onStateChange(res.state)
+        if (inspectedTracks.length === 1) {
+          const insp = await window.curationist.inspectMp3TrackMetadata(inspectedTracks[0].id)
+          if (insp.detail) {
+            setInspectedDetail(insp.detail)
+            setTagForm((prev) => ({
+              ...prev,
+              artist: insp.detail!.artist,
+              title: insp.detail!.title,
+              album: insp.detail!.album,
+              year: insp.detail!.year,
+              genre: insp.detail!.genre,
+              trackNumber: insp.detail!.trackNumber,
+              rating: insp.detail!.rating,
+              comment: insp.detail!.comment,
+              syncedLyrics: insp.detail!.syncedLyrics,
+              unsyncedLyrics: insp.detail!.unsyncedLyrics
+            }))
+          }
+        }
+        onNotify(
+          `Refreshed ID3 metadata & ratings (<RATING>/<STARS>) for ${res.refreshed} track(s)`
+        )
+      } catch (err: any) {
+        onNotify(`Metadata refresh error: ${err?.message || String(err)}`)
+      } finally {
+        setBusy(false)
+      }
+    },
+    [selectedTrackIds, filteredTracks, inspectedTracks, onStateChange, onNotify]
+  )
+
+  const resolvePlaylistTrackIds = useCallback(
+    (pl: MusicPlaylist): string[] => {
+      const ids: string[] = []
+      for (const it of pl.items || []) {
+        const matched =
+          (it.trackId && trackLookup.byId.get(it.trackId)) ||
+          trackLookup.byPath.get(it.value.replace(/\\/g, '/').toLowerCase())
+        if (matched) ids.push(matched.id)
+        else if (it.trackId) ids.push(it.trackId)
+      }
+      return ids
+    },
+    [trackLookup]
+  )
+
   const handleTrackContextMenu = (e: React.MouseEvent, track: Mp3Track) => {
     e.preventDefault()
     e.stopPropagation()
@@ -898,11 +1261,44 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
 
     const entries: ContextMenuEntry[] = [
       {
-        id: 'play',
-        label: count > 1 ? `Play Selected Tracks (${count})` : `Play "${track.title || track.filename}"`,
-        icon: <Play size={13} />,
-        onClick: () => onPlayTrack(firstTrack, count > 1 ? targetTracks : filteredTracks)
+        type: 'rating',
+        id: 'rate-mp3',
+        label: count > 1 ? `Rate (${count})` : 'Rate MP3 (Library & ID3)',
+        currentRating: track.rating || 0,
+        onSelectRating: (r: number) => {
+          void handleSetMp3Rating(targetIds, r)
+        }
       },
+      { type: 'separator', id: 'sep-rate' },
+      {
+        id: 'play-now',
+        label:
+          count > 1
+            ? `Play Now (${count} Selected)`
+            : `Play Now: "${track.title || track.filename}"`,
+        icon: <Play size={13} />,
+        onClick: () =>
+          onPlayTrack(firstTrack, count > 1 ? targetTracks : filteredTracks, 'play_now')
+      },
+      {
+        id: 'play-next',
+        label:
+          count > 1
+            ? `Play Next in Queue (${count} Selected)`
+            : `Play Next: "${track.title || track.filename}"`,
+        icon: <ArrowRight size={13} />,
+        onClick: () => onPlayTrack(firstTrack, targetTracks, 'play_next')
+      },
+      {
+        id: 'append-queue',
+        label:
+          count > 1
+            ? `Add to Live Queue (${count} Selected)`
+            : `Add to Live Queue: "${track.title || track.filename}"`,
+        icon: <Plus size={13} />,
+        onClick: () => onPlayTrack(firstTrack, targetTracks, 'append')
+      },
+      { type: 'separator', id: 'sep-queue' },
       {
         id: 'add-to-playlist',
         label: selectedPlaylist
@@ -927,6 +1323,14 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
         label: 'Reveal in Windows Explorer',
         icon: <ExternalLink size={13} />,
         onClick: () => window.curationist.showItemInFolder(track.filePath)
+      },
+      {
+        id: 'refresh-meta',
+        label: `Refresh ID3 & Rating Tags from File (${count})`,
+        icon: <RefreshCw size={13} />,
+        onClick: () => {
+          void handleRefreshMp3Metadata(targetIds)
+        }
       },
       { type: 'separator', id: 'sep-1' },
       {
@@ -973,18 +1377,74 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
     const targetItems = (selectedPlaylist.items || []).filter((it) =>
       targetItemIds.includes(it.id)
     )
+    const selectedTracks = targetItems
+      .map(
+        (it) =>
+          (it.trackId && trackLookup.byId.get(it.trackId)) ||
+          trackLookup.byPath.get(it.value.replace(/\\/g, '/').toLowerCase())
+      )
+      .filter(Boolean) as Mp3Track[]
     const trackIdsForConsolidate = Array.from(
       new Set(targetItems.map((it) => it.trackId).filter(Boolean) as string[])
     )
 
     const entries: ContextMenuEntry[] = [
       {
+        type: 'rating',
+        id: 'rate-pl-mp3',
+        label: count > 1 ? `Rate (${count})` : 'Rate MP3 (Library & ID3)',
+        currentRating: clickedTrack?.rating ?? item.rating ?? 0,
+        onSelectRating: (r: number) => {
+          if (trackIdsForConsolidate.length > 0) {
+            void handleSetMp3Rating(trackIdsForConsolidate, r)
+          }
+        }
+      },
+      { type: 'separator', id: 'sep-pl-rate' },
+      {
         id: 'play-item',
-        label: `Play "${item.title || item.value.split(/[\\/]/).pop()}"`,
+        label:
+          count > 1
+            ? `Play Now (${selectedTracks.length} Selected)`
+            : `Play Now: "${item.title || item.value.split(/[\\/]/).pop()}"`,
         icon: <Play size={13} />,
         disabled: !clickedTrack,
         onClick: () => {
-          if (clickedTrack) onPlayTrack(clickedTrack, plQueue)
+          if (clickedTrack) {
+            onPlayTrack(
+              clickedTrack,
+              count > 1 && selectedTracks.length > 0 ? selectedTracks : plQueue,
+              'play_now'
+            )
+          }
+        }
+      },
+      {
+        id: 'play-next-item',
+        label:
+          count > 1
+            ? `Play Next in Queue (${selectedTracks.length} Selected)`
+            : `Play Next: "${item.title || item.value.split(/[\\/]/).pop()}"`,
+        icon: <ArrowRight size={13} />,
+        disabled: selectedTracks.length === 0,
+        onClick: () => {
+          if (selectedTracks.length > 0) {
+            onPlayTrack(selectedTracks[0], selectedTracks, 'play_next')
+          }
+        }
+      },
+      {
+        id: 'append-queue-item',
+        label:
+          count > 1
+            ? `Add to Live Queue (${selectedTracks.length} Selected)`
+            : `Add to Live Queue: "${item.title || item.value.split(/[\\/]/).pop()}"`,
+        icon: <Plus size={13} />,
+        disabled: selectedTracks.length === 0,
+        onClick: () => {
+          if (selectedTracks.length > 0) {
+            onPlayTrack(selectedTracks[0], selectedTracks, 'append')
+          }
         }
       },
       {
@@ -1072,12 +1532,20 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
         year: tagForm.year || undefined,
         genre: tagForm.genre || undefined,
         trackNumber: inspectedTracks.length === 1 ? tagForm.trackNumber : undefined,
+        rating: tagForm.rating,
+        comment: inspectedTracks.length === 1 ? tagForm.comment : undefined,
+        syncedLyrics: inspectedTracks.length === 1 ? tagForm.syncedLyrics : undefined,
+        unsyncedLyrics: inspectedTracks.length === 1 ? tagForm.unsyncedLyrics : undefined,
         showTags: tagForm.showTags,
         coverArtBase64: tagForm.coverArtDirty ? tagForm.coverArtBase64 : undefined,
         coverArtMime: tagForm.coverArtDirty ? tagForm.coverArtMime : undefined,
         writeToFile: tagForm.writeToFile
       })
       onStateChange(res.state)
+      if (inspectedTracks.length === 1) {
+        const insp = await window.curationist.inspectMp3TrackMetadata(inspectedTracks[0].id)
+        if (insp.detail) setInspectedDetail(insp.detail)
+      }
       onNotify(
         `Updated ID3 metadata for ${res.updated} track(s)${
           res.errors.length ? ` (${res.errors[0]})` : ''
@@ -1097,41 +1565,25 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
     setPromptModal({ title, initialValue, onConfirm })
   }
 
-  // Stage / unstage playlist in Active saved-playlists.json
+  // Stage single active playlist for OBS Curationist Audio
   const stagePlaylistInActiveJson = async (playlistId: string) => {
-    if (state.activeJsonPlaylistIds.includes(playlistId)) return
-    const nextIds = [...state.activeJsonPlaylistIds, playlistId]
-    const next = await window.curationist.setActiveMusicJsonPlaylists(nextIds)
+    const plName = state.playlists.find((p) => p.id === playlistId)?.name || 'playlist'
+    const next = await window.curationist.setActiveMusicJsonPlaylists([playlistId])
     onStateChange(next)
-    onNotify('Staged playlist in active saved-playlists.json draft (Modified)')
-  }
-
-  const unstagePlaylistFromActiveJson = async (playlistId: string) => {
-    const nextIds = state.activeJsonPlaylistIds.filter((id) => id !== playlistId)
-    const next = await window.curationist.setActiveMusicJsonPlaylists(nextIds)
-    onStateChange(next)
-    onNotify('Removed playlist from active saved-playlists.json draft (Modified)')
-  }
-
-  const moveActiveJsonPlaylist = async (playlistId: string, dir: -1 | 1) => {
-    const ids = [...state.activeJsonPlaylistIds]
-    const idx = ids.indexOf(playlistId)
-    if (idx === -1) return
-    const target = idx + dir
-    if (target < 0 || target >= ids.length) return
-    const tmp = ids[idx]
-    ids[idx] = ids[target]
-    ids[target] = tmp
-    const next = await window.curationist.setActiveMusicJsonPlaylists(ids)
-    onStateChange(next)
+    onNotify(`Staged "${plName}" as active OBS Audio playlist (Modified)`)
   }
 
   const handlePublishMusic = async () => {
     setBusy(true)
     try {
+      if (activeObsPlaylist && (state.activeJsonPlaylistIds.length !== 1 || state.activeJsonPlaylistIds[0] !== activeObsPlaylist.id)) {
+        await window.curationist.setActiveMusicJsonPlaylists([activeObsPlaylist.id])
+      }
       const res = await window.curationist.publishMusicPlaylists()
       onStateChange(res.state)
-      onNotify(`Published ${res.publishedPlaylists} playlist(s) to ${res.path}`)
+      onNotify(
+        `Published "${activeObsPlaylist?.name || 'Active Playlist'}" (${activeObsPlaylist?.itemCount || 0} tracks) to OBS Curationist Audio`
+      )
     } catch (err: any) {
       onNotify(`Publish error: ${err?.message || String(err)}`)
     } finally {
@@ -1288,10 +1740,20 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
                     draggable
                     onDragStart={(e) => {
                       e.dataTransfer.setData('application/x-curationist-playlist-id', pl.id)
+                      const plTrackIds = resolvePlaylistTrackIds(pl)
+                      if (plTrackIds.length > 0) {
+                        e.dataTransfer.setData(
+                          'application/x-curationist-track-ids',
+                          JSON.stringify(plTrackIds)
+                        )
+                      }
                       e.dataTransfer.effectAllowed = 'copyMove'
                     }}
                     onDragOver={(e) => {
-                      if (e.dataTransfer.types.includes('application/x-curationist-track-ids')) {
+                      if (
+                        e.dataTransfer.types.includes('application/x-curationist-track-ids') ||
+                        e.dataTransfer.types.includes('application/x-curationist-playlist-id')
+                      ) {
                         e.preventDefault()
                         e.stopPropagation()
                         e.dataTransfer.dropEffect = 'copy'
@@ -1305,14 +1767,29 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
                     }}
                     onDrop={(e) => {
                       setDragOverPlaylistId(null)
+                      const sourcePlId = e.dataTransfer.getData(
+                        'application/x-curationist-playlist-id'
+                      )
+                      if (sourcePlId && sourcePlId !== pl.id) {
+                        e.preventDefault()
+                        e.stopPropagation()
+                        const sourcePl = state.playlists.find((p) => p.id === sourcePlId)
+                        if (sourcePl) {
+                          const ids = resolvePlaylistTrackIds(sourcePl)
+                          if (ids.length > 0) {
+                            void handleAddTracksToTargetPlaylist(pl, ids)
+                          }
+                        }
+                        return
+                      }
                       const raw = e.dataTransfer.getData('application/x-curationist-track-ids')
-                      if (raw) {
+                      if (raw && !sourcePlId) {
                         e.preventDefault()
                         e.stopPropagation()
                         try {
                           const ids = JSON.parse(raw) as string[]
                           if (ids.length > 0) {
-                            handleAddTracksToTargetPlaylist(pl, ids)
+                            void handleAddTracksToTargetPlaylist(pl, ids)
                           }
                         } catch {
                           // ignore
@@ -1329,7 +1806,9 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
                       <span className="list-row-title">{pl.name}</span>
                     </div>
                     <div className="list-row-meta" onClick={(e) => e.stopPropagation()}>
-                      {pl.inActiveJson && <span className="badge synced">In JSON</span>}
+                      {activeObsPlaylist?.id === pl.id && (
+                        <span className="badge synced">Active OBS</span>
+                      )}
                       <span>{pl.itemCount}</span>
                       <button
                         className="icon-btn"
@@ -1338,10 +1817,10 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
                       >
                         <Play size={11} />
                       </button>
-                      {!pl.inActiveJson && (
+                      {activeObsPlaylist?.id !== pl.id && (
                         <button
                           className="icon-btn accent"
-                          title="Stage in Active saved-playlists.json"
+                          title="Stage as Active OBS Audio Playlist"
                           onClick={() => stagePlaylistInActiveJson(pl.id)}
                         >
                           <ArrowRight size={12} />
@@ -1491,8 +1970,8 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
           <DockableSection
             key={sec.id}
             id={sec.id}
-            title="Active saved-playlists.json"
-            count={activeJsonPlaylists.length}
+            title="Active OBS Audio Playlist"
+            count={activeObsPlaylist?.itemCount || 0}
             badgeText={state.isModified ? 'MODIFIED' : 'SYNCED'}
             badgeVariant={state.isModified ? 'modified' : 'synced'}
             side={sec.side}
@@ -1508,16 +1987,19 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
               <>
                 <button
                   className="icon-btn"
-                  title="New Playlist (Create Locally & Stage in Active saved-playlists.json)"
+                  title="New Playlist (Create Locally & Stage as Active OBS Audio Playlist)"
                   onClick={() =>
                     openPrompt(
                       'New Staged Music Playlist Name',
                       'New Playlist',
                       async (val) => {
-                        const res = await window.curationist.createMusicPlaylist(val, true)
-                        onStateChange(res.state)
+                        const res = await window.curationist.createMusicPlaylist(val, false)
+                        const next = await window.curationist.setActiveMusicJsonPlaylists([
+                          res.newId
+                        ])
+                        onStateChange(next)
                         setSelectedPlaylistId(res.newId)
-                        onNotify(`Created and staged playlist "${val}" in saved-playlists.json`)
+                        onNotify(`Created and staged playlist "${val}" as active OBS Audio playlist`)
                       }
                     )
                   }
@@ -1558,13 +2040,22 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
                   textOverflow: 'ellipsis',
                   whiteSpace: 'nowrap'
                 }}
-                title={state.targetJsonPath}
               >
-                {state.isModified
-                  ? 'Draft has unpublished changes'
-                  : 'All active playlists published'}
+                {activeObsPlaylist
+                  ? `Staged: ${activeObsPlaylist.name}`
+                  : 'Drag a music playlist here'}
               </span>
               <div style={{ display: 'flex', gap: 4 }}>
+                {activeObsPlaylist && (
+                  <button
+                    className="vscode-btn"
+                    disabled={(activeObsPlaylist.items || []).length === 0}
+                    onClick={() => handlePlayPlaylist(activeObsPlaylist)}
+                    title={`Play staged playlist "${activeObsPlaylist.name}"`}
+                  >
+                    <Play size={11} /> Play
+                  </button>
+                )}
                 <button
                   className="vscode-btn"
                   disabled={busy}
@@ -1573,14 +2064,17 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
                       'New Staged Music Playlist Name',
                       'New Playlist',
                       async (val) => {
-                        const res = await window.curationist.createMusicPlaylist(val, true)
-                        onStateChange(res.state)
+                        const res = await window.curationist.createMusicPlaylist(val, false)
+                        const next = await window.curationist.setActiveMusicJsonPlaylists([
+                          res.newId
+                        ])
+                        onStateChange(next)
                         setSelectedPlaylistId(res.newId)
-                        onNotify(`Created and staged playlist "${val}" in saved-playlists.json`)
+                        onNotify(`Created and staged playlist "${val}" as active OBS Audio playlist`)
                       }
                     )
                   }
-                  title="Create a new local playlist and automatically stage it in saved-playlists.json"
+                  title="Create a new local playlist and stage it as the active OBS Audio playlist"
                 >
                   <Plus size={12} /> New Playlist
                 </button>
@@ -1588,7 +2082,7 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
                   className={`vscode-btn ${state.isModified ? 'publish' : 'primary'}`}
                   disabled={busy}
                   onClick={handlePublishMusic}
-                  title={`Write ${activeJsonPlaylists.length} playlists to ${state.targetJsonPath}`}
+                  title={`Publish "${activeObsPlaylist?.name || 'Active Playlist'}" to OBS Curationist Audio`}
                 >
                   <UploadCloud size={12} /> Publish
                 </button>
@@ -1598,7 +2092,10 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
             <div
               className="list-scroll"
               onDragOver={(e) => {
-                if (e.dataTransfer.types.includes('application/x-curationist-playlist-id')) {
+                if (
+                  e.dataTransfer.types.includes('application/x-curationist-playlist-id') ||
+                  e.dataTransfer.types.includes('application/x-curationist-track-ids')
+                ) {
                   e.preventDefault()
                   e.dataTransfer.dropEffect = 'copy'
                 }
@@ -1606,52 +2103,65 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
               onDrop={(e) => {
                 const plId = e.dataTransfer.getData('application/x-curationist-playlist-id')
                 if (plId) {
-                  stagePlaylistInActiveJson(plId)
+                  void stagePlaylistInActiveJson(plId)
+                  setSelectedPlaylistId(plId)
+                  return
+                }
+                const rawTracks = e.dataTransfer.getData('application/x-curationist-track-ids')
+                if (rawTracks && activeObsPlaylist) {
+                  try {
+                    const ids = JSON.parse(rawTracks) as string[]
+                    if (ids.length > 0) {
+                      void handleAddTracksToTargetPlaylist(activeObsPlaylist, ids)
+                    }
+                  } catch {
+                    // ignore
+                  }
                 }
               }}
             >
-              {activeJsonPlaylists.length === 0 ? (
+              <div style={{ padding: '8px 10px', borderBottom: '1px solid #2b2b2b', fontSize: 11 }}>
+                <div style={{ color: '#8b949e' }}>
+                  <strong>Curationist Audio Target:</strong>{' '}
+                  {activeObsPlaylist
+                    ? `${activeObsPlaylist.name} (${activeObsPlaylist.itemCount} tracks)`
+                    : 'None selected'}
+                </div>
+                <div
+                  style={{
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: 10.5,
+                    color: '#6e7681',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap'
+                  }}
+                  title={state.targetJsonPath}
+                >
+                  {state.targetJsonPath}
+                </div>
+              </div>
+
+              {!activeObsPlaylist || (activeObsPlaylist.items || []).length === 0 ? (
                 <div className="empty-placeholder">
-                  <span>Drag playlists here from All Known Playlists</span>
+                  <span>Drag a playlist or tracks here to stage for OBS Curationist Audio</span>
                 </div>
               ) : (
-                activeJsonPlaylists.map((pl, idx) => {
-                  const isDragTarget = dragOverPlaylistId === `active-${pl.id}`
+                (activeObsPlaylist.items || []).map((item, idx) => {
+                  const fullPlQueue = resolvePlaylistTracks(activeObsPlaylist)
+                  const matchedTrack =
+                    (item.trackId && trackLookup.byId.get(item.trackId)) ||
+                    trackLookup.byPath.get(item.value.replace(/\\/g, '/').toLowerCase())
                   return (
                     <div
-                      key={pl.id}
-                      className={`list-row ${pl.id === selectedPlaylistId ? 'selected' : ''} ${
-                        isDragTarget ? 'drag-target-playlist' : ''
-                      }`}
-                      onClick={() => setSelectedPlaylistId(pl.id)}
-                      onDragOver={(e) => {
-                        if (e.dataTransfer.types.includes('application/x-curationist-track-ids')) {
-                          e.preventDefault()
-                          e.stopPropagation()
-                          e.dataTransfer.dropEffect = 'copy'
-                          setDragOverPlaylistId(`active-${pl.id}`)
-                        }
+                      key={item.id}
+                      className="list-row"
+                      onClick={() => {
+                        setSelectedPlaylistId(activeObsPlaylist.id)
+                        setSelectedPlaylistItemIds([item.id])
                       }}
-                      onDragLeave={() => {
-                        if (dragOverPlaylistId === `active-${pl.id}`) {
-                          setDragOverPlaylistId(null)
-                        }
-                      }}
-                      onDrop={(e) => {
-                        setDragOverPlaylistId(null)
-                        const raw = e.dataTransfer.getData('application/x-curationist-track-ids')
-                        if (raw) {
-                          e.preventDefault()
-                          e.stopPropagation()
-                          try {
-                            const ids = JSON.parse(raw) as string[]
-                            if (ids.length > 0) {
-                              handleAddTracksToTargetPlaylist(pl, ids)
-                            }
-                          } catch {
-                            // ignore
-                          }
-                        }
+                      onDoubleClick={() => {
+                        if (matchedTrack) onPlayTrack(matchedTrack, fullPlQueue, 'play_now')
                       }}
                     >
                       <div className="list-row-main">
@@ -1660,44 +2170,26 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
                             fontFamily: 'var(--font-mono)',
                             fontSize: 10.5,
                             color: '#8b949e',
-                            width: 18
+                            width: 22
                           }}
                         >
                           #{idx + 1}
                         </span>
-                        <span className="list-row-title">{pl.name}</span>
+                        <span className="list-row-title">
+                          {item.title || item.value.split(/[\\/]/).pop()}
+                          {item.artist ? ` — ${item.artist}` : ''}
+                        </span>
                       </div>
                       <div className="list-row-meta" onClick={(e) => e.stopPropagation()}>
-                        <span>{pl.itemCount}</span>
                         <button
-                          className="icon-btn"
-                          onClick={() => handlePlayPlaylist(pl)}
-                          title={`Play Playlist "${pl.name}"`}
+                          className="icon-btn accent"
+                          disabled={!matchedTrack}
+                          onClick={() => {
+                            if (matchedTrack) onPlayTrack(matchedTrack, fullPlQueue, 'play_now')
+                          }}
+                          title="Play Track Now"
                         >
                           <Play size={11} />
-                        </button>
-                        <button
-                          className="icon-btn"
-                          disabled={idx === 0}
-                          onClick={() => moveActiveJsonPlaylist(pl.id, -1)}
-                          title="Move Up in JSON"
-                        >
-                          <ArrowUp size={12} />
-                        </button>
-                        <button
-                          className="icon-btn"
-                          disabled={idx === activeJsonPlaylists.length - 1}
-                          onClick={() => moveActiveJsonPlaylist(pl.id, 1)}
-                          title="Move Down in JSON"
-                        >
-                          <ArrowDown size={12} />
-                        </button>
-                        <button
-                          className="icon-btn danger"
-                          onClick={() => unstagePlaylistFromActiveJson(pl.id)}
-                          title="Remove from Active saved-playlists.json (keeps in library)"
-                        >
-                          <Trash2 size={12} />
                         </button>
                       </div>
                     </div>
@@ -1708,12 +2200,34 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
           </DockableSection>
         )
 
-      case 'id3-inspector':
+      case 'id3-inspector': {
+        const singleTrack = inspectedTracks.length === 1 ? inspectedTracks[0] : null
+        const effDuration = inspectedDetail?.duration ?? singleTrack?.duration ?? 0
+        const effSampleRate = inspectedDetail?.sampleRate ?? singleTrack?.sampleRate ?? 0
+        const effBitrate = inspectedDetail?.bitrate ?? singleTrack?.bitrate ?? 0
+        const effChannels = inspectedDetail?.channels ?? singleTrack?.channels ?? 2
+        const effCodec = inspectedDetail?.codec || singleTrack?.codec || 'MP3'
+        const effFileSize = inspectedDetail?.fileSize ?? singleTrack?.fileSize ?? 0
+        const effAddedAt = inspectedDetail?.addedAt || singleTrack?.addedAt || ''
+        const syncedText = tagForm.syncedLyrics || ''
+        const firstSyncedLine =
+          syncedText
+            .split(/\r?\n/)
+            .map((l) => l.trim())
+            .find((l) => l.length > 0) ||
+          (singleTrack?.hasSyncedLyrics ? singleTrack.syncedLyricsFirstLine : '')
+        const hasSynced = Boolean(firstSyncedLine)
+        const syncedLineCount = syncedText
+          ? syncedText.split(/\r?\n/).filter((l) => l.trim().length > 0).length
+          : hasSynced
+            ? 1
+            : 0
+
         return (
           <DockableSection
             key={sec.id}
             id={sec.id}
-            title="ID3 Tag & Cover Art Editor"
+            title="ID3 Tag & Metadata Inspector"
             count={inspectedTracks.length}
             side={sec.side}
             collapsed={sec.collapsed}
@@ -1727,7 +2241,7 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
           >
             {inspectedTracks.length === 0 ? (
               <div className="empty-placeholder">
-                <span>Select one or more MP3 tracks to inspect or edit ID3 tags and cover art</span>
+                <span>Select one or more MP3 tracks to inspect or edit ID3 tags, ratings, lyrics &amp; cover art</span>
               </div>
             ) : (
               <form className="inspector-pane" onSubmit={handleSaveId3Tags}>
@@ -1742,10 +2256,23 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
                       <Music size={24} color="#6e7681" />
                     )}
                   </div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 5, flex: 1 }}>
-                    <div style={{ fontWeight: 600, color: '#ffffff' }}>
-                      {inspectedTracks.length === 1
-                        ? inspectedTracks[0].filename
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 5, flex: 1, minWidth: 0 }}>
+                    <div
+                      style={{
+                        fontWeight: 600,
+                        color: '#ffffff',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap'
+                      }}
+                      title={
+                        singleTrack
+                          ? singleTrack.filename
+                          : `${inspectedTracks.length} Tracks Selected (Batch Mode)`
+                      }
+                    >
+                      {singleTrack
+                        ? singleTrack.filename
                         : `${inspectedTracks.length} Tracks Selected (Batch Mode)`}
                     </div>
                     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -1782,11 +2309,122 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
                           Clear
                         </button>
                       )}
+                      <button
+                        type="button"
+                        className="vscode-btn"
+                        disabled={busy}
+                        onClick={() => handleRefreshMp3Metadata(inspectedTracks.map((t) => t.id))}
+                        title="Re-scan ID3 tags (<RATING>, <STARS>, <SYNCED LYRICS>, duration, sample rate) from disk"
+                      >
+                        <RefreshCw size={11} /> Re-read ID3
+                      </button>
                     </div>
                   </div>
                 </div>
 
+                {/* Technical Audio & File Metadata Summary */}
+                {singleTrack && (
+                  <div
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+                      gap: '5px 8px',
+                      padding: '7px 9px',
+                      background: 'rgba(255, 255, 255, 0.025)',
+                      border: '1px solid #2b2b2b',
+                      borderRadius: 4,
+                      fontSize: 10.5
+                    }}
+                  >
+                    <div>
+                      <div style={{ color: '#6e7681', fontSize: 9.5, textTransform: 'uppercase' }}>Duration</div>
+                      <div style={{ color: '#d4d4d4', fontFamily: 'var(--font-mono)', fontWeight: 600 }}>
+                        {formatDuration(effDuration)}
+                      </div>
+                    </div>
+                    <div>
+                      <div style={{ color: '#6e7681', fontSize: 9.5, textTransform: 'uppercase' }}>Sample Rate</div>
+                      <div style={{ color: '#d4d4d4', fontFamily: 'var(--font-mono)' }}>
+                        {effSampleRate ? `${(effSampleRate / 1000).toFixed(1)} kHz` : '—'}
+                      </div>
+                    </div>
+                    <div>
+                      <div style={{ color: '#6e7681', fontSize: 9.5, textTransform: 'uppercase' }}>Bitrate</div>
+                      <div style={{ color: '#d4d4d4', fontFamily: 'var(--font-mono)' }}>
+                        {effBitrate ? `${Math.round(effBitrate / 1000)} kbps` : '—'}
+                      </div>
+                    </div>
+                    <div>
+                      <div style={{ color: '#6e7681', fontSize: 9.5, textTransform: 'uppercase' }}>Codec / Ch</div>
+                      <div
+                        style={{
+                          color: '#d4d4d4',
+                          fontFamily: 'var(--font-mono)',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap'
+                        }}
+                        title={`${effCodec} (${effChannels === 1 ? 'Mono' : effChannels === 2 ? 'Stereo' : `${effChannels}ch`})`}
+                      >
+                        {effChannels === 1 ? 'Mono' : effChannels === 2 ? 'Stereo' : `${effChannels}ch`} •{' '}
+                        {effCodec.replace(/^MPEG\s+/i, '')}
+                      </div>
+                    </div>
+                    <div>
+                      <div style={{ color: '#6e7681', fontSize: 9.5, textTransform: 'uppercase' }}>File Size</div>
+                      <div style={{ color: '#d4d4d4', fontFamily: 'var(--font-mono)' }}>
+                        {formatBytes(effFileSize)}
+                      </div>
+                    </div>
+                    <div>
+                      <div style={{ color: '#6e7681', fontSize: 9.5, textTransform: 'uppercase' }}>Date Added</div>
+                      <div
+                        style={{ color: '#d4d4d4', fontFamily: 'var(--font-mono)' }}
+                        title={effAddedAt}
+                      >
+                        {formatDateAdded(effAddedAt)}
+                      </div>
+                    </div>
+                    {inspectedDetail && (inspectedDetail.rawRatingTag || inspectedDetail.rawStarsTag) && (
+                      <div
+                        style={{
+                          gridColumn: '1 / -1',
+                          borderTop: '1px solid #252526',
+                          paddingTop: 4,
+                          marginTop: 2,
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          color: '#8b949e',
+                          fontFamily: 'var(--font-mono)',
+                          fontSize: 10
+                        }}
+                      >
+                        <span>ID3 &lt;RATING&gt;: {inspectedDetail.rawRatingTag ?? '—'}</span>
+                        <span>ID3 &lt;STARS&gt;: {inspectedDetail.rawStarsTag ?? '—'}</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <div className="form-grid">
+                  <div className="form-field full">
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <label className="form-label" style={{ marginBottom: 0 }}>
+                        Rating (max of &lt;RATING&gt; &amp; &lt;STARS&gt;)
+                      </label>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <Mp3StarRating
+                          rating={tagForm.rating ?? 0}
+                          size={14}
+                          onChange={(r) => setTagForm({ ...tagForm, rating: r })}
+                        />
+                        <span style={{ fontSize: 10.5, fontFamily: 'var(--font-mono)', color: '#9ca3af', minWidth: 34 }}>
+                          {tagForm.rating === null ? 'Mixed' : `${tagForm.rating}/5`}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
                   <div className="form-field full">
                     <label className="form-label">Artist</label>
                     <input
@@ -1813,6 +2451,7 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
                     <input
                       className="vscode-input"
                       value={tagForm.album}
+                      placeholder={inspectedTracks.length > 1 ? '(Keep individual albums)' : ''}
                       onChange={(e) => setTagForm({ ...tagForm, album: e.target.value })}
                     />
                   </div>
@@ -1834,6 +2473,92 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
                       onChange={(e) => setTagForm({ ...tagForm, genre: e.target.value })}
                     />
                   </div>
+
+                  {inspectedTracks.length === 1 && (
+                    <>
+                      <div className="form-field">
+                        <label className="form-label">Track #</label>
+                        <input
+                          className="vscode-input"
+                          value={tagForm.trackNumber}
+                          placeholder="e.g. 1 or 1/12"
+                          onChange={(e) => setTagForm({ ...tagForm, trackNumber: e.target.value })}
+                        />
+                      </div>
+
+                      <div className="form-field">
+                        <label className="form-label">Comment</label>
+                        <input
+                          className="vscode-input"
+                          value={tagForm.comment}
+                          onChange={(e) => setTagForm({ ...tagForm, comment: e.target.value })}
+                        />
+                      </div>
+
+                      {/* <SYNCED LYRICS> status & first-line preview (double-click to open multi-line modal) */}
+                      <div className="form-field full">
+                        <div
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            marginBottom: 3
+                          }}
+                        >
+                          <label className="form-label" style={{ marginBottom: 0, display: 'flex', alignItems: 'center', gap: 6 }}>
+                            <span>&lt;SYNCED LYRICS&gt;</span>
+                            {hasSynced ? (
+                              <span
+                                className="badge synced"
+                                style={{ fontSize: 9.5, padding: '1px 5px' }}
+                                title={`Synced lyrics present (${syncedLineCount} lines)`}
+                              >
+                                PRESENT {syncedLineCount > 1 ? `(${syncedLineCount}L)` : ''}
+                              </span>
+                            ) : (
+                              <span
+                                className="badge"
+                                style={{ fontSize: 9.5, padding: '1px 5px', opacity: 0.7 }}
+                              >
+                                NONE
+                              </span>
+                            )}
+                          </label>
+                          <button
+                            type="button"
+                            className="vscode-btn"
+                            style={{ padding: '1px 6px', fontSize: 10.5 }}
+                            onClick={() => setSyncedLyricsModalOpen(true)}
+                            title="Open multi-line <SYNCED LYRICS> editor modal"
+                          >
+                            Edit Lyrics...
+                          </button>
+                        </div>
+                        <div
+                          onDoubleClick={() => setSyncedLyricsModalOpen(true)}
+                          title="Double-click to edit multi-line <SYNCED LYRICS> in modal window"
+                          style={{
+                            padding: '6px 8px',
+                            background: '#18181b',
+                            border: `1px solid ${hasSynced ? 'rgba(63, 185, 80, 0.35)' : '#323233'}`,
+                            borderRadius: 4,
+                            fontFamily: 'var(--font-mono)',
+                            fontSize: 11,
+                            color: hasSynced ? '#d4d4d4' : '#6e7681',
+                            cursor: 'pointer',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                            userSelect: 'none'
+                          }}
+                        >
+                          {hasSynced
+                            ? firstSyncedLine
+                            : '(No <SYNCED LYRICS> tag — double-click to add)'}
+                        </div>
+                      </div>
+                    </>
+                  )}
                 </div>
 
                 <label className="checkbox-row">
@@ -1842,7 +2567,7 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
                     checked={tagForm.showTags}
                     onChange={(e) => setTagForm({ ...tagForm, showTags: e.target.checked })}
                   />
-                  <span>Show Artist/Title Overlay in nowPlaylisting (show_tags)</span>
+                  <span>Show Artist/Title Overlay in OBS Audio (show_tags)</span>
                 </label>
 
                 <label className="checkbox-row">
@@ -1851,7 +2576,7 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
                     checked={tagForm.writeToFile}
                     onChange={(e) => setTagForm({ ...tagForm, writeToFile: e.target.checked })}
                   />
-                  <span>Write ID3v2 Tags &amp; Cover Art directly to MP3 file(s) on disk</span>
+                  <span>Write ID3v2 Tags, Rating, Synced Lyrics &amp; Art directly to MP3 file(s)</span>
                 </label>
 
                 <button type="submit" className="vscode-btn primary" disabled={busy}>
@@ -1861,6 +2586,7 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
             )}
           </DockableSection>
         )
+      }
 
       default:
         return null
@@ -2125,13 +2851,26 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
                 }}
               >
                 <div className="editor-toolbar">
-                  <div className="editor-toolbar-group" style={{ flex: 1, maxWidth: 480 }}>
+                  <div className="editor-toolbar-group" style={{ flex: 1, maxWidth: 560 }}>
                     <input
                       className="vscode-input"
                       placeholder="Filter MP3 library by artist, title, album, or filename..."
                       value={librarySearch}
                       onChange={(e) => setLibrarySearch(e.target.value)}
                     />
+                    <select
+                      className="vscode-select"
+                      style={{ width: 132 }}
+                      value={ratingFilter}
+                      onChange={(e) => setRatingFilter(e.target.value as any)}
+                      title="Filter MP3 library by star rating (derived from ID3 <RATING> / <STARS>)"
+                    >
+                      <option value="all">All MP3s</option>
+                      <option value="rated">Rated Only (1+ ★)</option>
+                      <option value="5">★★★★★ (5 Stars)</option>
+                      <option value="4plus">★★★★+ (4+ Stars)</option>
+                      <option value="3plus">★★★+ (3+ Stars)</option>
+                    </select>
                     {selectedFolder && (
                       <span className="active-folder-pill" title={`Folder filter: ${selectedFolder}`}>
                         <span className="active-folder-pill-text">{selectedFolder}</span>
@@ -2164,6 +2903,22 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
                       title="Add folder of MP3s to library"
                     >
                       <FolderPlus size={12} /> Add Folder
+                    </button>
+                    <button
+                      className="vscode-btn"
+                      disabled={busy}
+                      onClick={() =>
+                        handleRefreshMp3Metadata(
+                          selectedTrackIds.length > 0 ? selectedTrackIds : undefined
+                        )
+                      }
+                      title={
+                        selectedTrackIds.length > 0
+                          ? `Re-scan ID3 tags (<RATING>, <STARS>, <SYNCED LYRICS>, etc.) for ${selectedTrackIds.length} selected MP3(s)`
+                          : 'Re-scan ID3 tags (<RATING>, <STARS>, <SYNCED LYRICS>, etc.) for all MP3 tracks in library'
+                      }
+                    >
+                      <RefreshCw size={12} /> Refresh ID3
                     </button>
                     <button
                       className="vscode-btn primary"
@@ -2207,127 +2962,65 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
                   <table className="data-table">
                     <thead>
                       <tr>
-                        <th style={{ width: libColWidths.play }}>
-                          Play
-                          <div
-                            className="col-resize-handle"
-                            onMouseDown={(e) => startLibColResize('play', e)}
-                          />
-                        </th>
-                        <th
-                          className="sortable-th"
-                          style={{ width: libColWidths.title }}
-                          onClick={() => cycleLibSort('title')}
-                        >
-                          <div className="th-sort-content">
-                            <span>Title</span>
-                            {libSort.col === 'title' && (
-                              <span className="sort-indicator">
-                                {libSort.dir === 'asc' ? '▲' : '▼'}
-                              </span>
-                            )}
-                          </div>
-                          <div
-                            className="col-resize-handle"
-                            onMouseDown={(e) => startLibColResize('title', e)}
-                          />
-                        </th>
-                        <th
-                          className="sortable-th"
-                          style={{ width: libColWidths.artist }}
-                          onClick={() => cycleLibSort('artist')}
-                        >
-                          <div className="th-sort-content">
-                            <span>Artist</span>
-                            {libSort.col === 'artist' && (
-                              <span className="sort-indicator">
-                                {libSort.dir === 'asc' ? '▲' : '▼'}
-                              </span>
-                            )}
-                          </div>
-                          <div
-                            className="col-resize-handle"
-                            onMouseDown={(e) => startLibColResize('artist', e)}
-                          />
-                        </th>
-                        <th
-                          className="sortable-th"
-                          style={{ width: libColWidths.album }}
-                          onClick={() => cycleLibSort('album')}
-                        >
-                          <div className="th-sort-content">
-                            <span>Album</span>
-                            {libSort.col === 'album' && (
-                              <span className="sort-indicator">
-                                {libSort.dir === 'asc' ? '▲' : '▼'}
-                              </span>
-                            )}
-                          </div>
-                          <div
-                            className="col-resize-handle"
-                            onMouseDown={(e) => startLibColResize('album', e)}
-                          />
-                        </th>
-                        <th
-                          className="sortable-th"
-                          style={{ width: libColWidths.duration }}
-                          onClick={() => cycleLibSort('duration')}
-                        >
-                          <div className="th-sort-content">
-                            <span>Time</span>
-                            {libSort.col === 'duration' && (
-                              <span className="sort-indicator">
-                                {libSort.dir === 'asc' ? '▲' : '▼'}
-                              </span>
-                            )}
-                          </div>
-                          <div
-                            className="col-resize-handle"
-                            onMouseDown={(e) => startLibColResize('duration', e)}
-                          />
-                        </th>
-                        <th
-                          className="sortable-th"
-                          style={{ width: libColWidths.storage }}
-                          onClick={() => cycleLibSort('storage')}
-                        >
-                          <div className="th-sort-content">
-                            <span>Storage</span>
-                            {libSort.col === 'storage' && (
-                              <span className="sort-indicator">
-                                {libSort.dir === 'asc' ? '▲' : '▼'}
-                              </span>
-                            )}
-                          </div>
-                          <div
-                            className="col-resize-handle"
-                            onMouseDown={(e) => startLibColResize('storage', e)}
-                          />
-                        </th>
-                        <th
-                          className="sortable-th"
-                          style={{ width: libColWidths.filePath }}
-                          onClick={() => cycleLibSort('filePath')}
-                        >
-                          <div className="th-sort-content">
-                            <span>File Path</span>
-                            {libSort.col === 'filePath' && (
-                              <span className="sort-indicator">
-                                {libSort.dir === 'asc' ? '▲' : '▼'}
-                              </span>
-                            )}
-                          </div>
-                          <div
-                            className="col-resize-handle"
-                            onMouseDown={(e) => startLibColResize('filePath', e)}
-                          />
-                        </th>
+                        {libColOrder.map((col) => {
+                          const dragProps = getLibHeaderDragProps(col)
+                          if (col === 'play') {
+                            return (
+                              <th
+                                key={col}
+                                {...dragProps}
+                                className={dragProps.className}
+                                style={{ width: libColWidths.play, cursor: 'grab' }}
+                                title="Drag column header to reorder"
+                              >
+                                Play
+                                <div
+                                  className="col-resize-handle"
+                                  onMouseDown={(e) => startLibColResize('play', e)}
+                                />
+                              </th>
+                            )
+                          }
+                          const labelMap: Record<Exclude<MusicLibColKey, 'play'>, string> = {
+                            title: 'Title',
+                            artist: 'Artist',
+                            album: 'Album',
+                            rating: 'Rating',
+                            duration: 'Time',
+                            addedAt: 'Date Added',
+                            storage: 'Storage',
+                            filePath: 'File Path'
+                          }
+                          return (
+                            <th
+                              key={col}
+                              {...dragProps}
+                              className={`sortable-th ${dragProps.className}`.trim()}
+                              style={{ width: libColWidths[col], cursor: 'grab' }}
+                              onClick={() => cycleLibSort(col)}
+                              title="Click to sort • Drag column header to reorder"
+                            >
+                              <div className="th-sort-content">
+                                <span>{labelMap[col]}</span>
+                                {libSort.col === col && (
+                                  <span className="sort-indicator">
+                                    {libSort.dir === 'asc' ? '▲' : '▼'}
+                                  </span>
+                                )}
+                              </div>
+                              <div
+                                className="col-resize-handle"
+                                onMouseDown={(e) => startLibColResize(col, e)}
+                              />
+                            </th>
+                          )
+                        })}
                       </tr>
                     </thead>
                     <tbody>
                       {libVirtual.topSpacerHeight > 0 && (
                         <tr aria-hidden="true" style={{ height: libVirtual.topSpacerHeight }}>
-                          <td colSpan={7} style={{ padding: 0, border: 'none' }} />
+                          <td colSpan={libColOrder.length} style={{ padding: 0, border: 'none' }} />
                         </tr>
                       )}
                       {filteredTracks
@@ -2352,51 +3045,111 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
                               onContextMenu={(e) => handleTrackContextMenu(e, track)}
                               onDoubleClick={() => onPlayTrack(track, filteredTracks)}
                             >
-                              <td style={{ textAlign: 'center' }}>
-                                <button
-                                  className="icon-btn"
-                                  onClick={(e) => {
-                                    e.stopPropagation()
-                                    onPlayTrack(track, filteredTracks)
-                                  }}
-                                  title="Play Track Preview"
-                                >
-                                  <Play size={11} />
-                                </button>
-                              </td>
-                              <td title={track.title || track.filename}>
-                                <strong>{track.title || track.filename}</strong>
-                              </td>
-                              <td title={track.artist}>{track.artist || '—'}</td>
-                              <td title={track.album}>{track.album || '—'}</td>
-                              <td style={{ fontFamily: 'var(--font-mono)' }}>
-                                {formatDuration(track.duration)}
-                              </td>
-                              <td>
-                                {!track.fileExists ? (
-                                  <span className="badge missing">Missing</span>
-                                ) : track.isManaged ? (
-                                  <span className="badge managed">Managed</span>
-                                ) : (
-                                  <span className="badge">External</span>
-                                )}
-                              </td>
-                              <td
-                                style={{
-                                  fontFamily: 'var(--font-mono)',
-                                  fontSize: 11,
-                                  color: '#8b949e'
-                                }}
-                                title={track.filePath}
-                              >
-                                {track.filePath}
-                              </td>
+                              {libColOrder.map((col) => {
+                                switch (col) {
+                                  case 'play':
+                                    return (
+                                      <td key={col} style={{ textAlign: 'center' }}>
+                                        <button
+                                          className="icon-btn"
+                                          onClick={(e) => {
+                                            e.stopPropagation()
+                                            onPlayTrack(track, filteredTracks)
+                                          }}
+                                          title="Play Track Preview"
+                                        >
+                                          <Play size={11} />
+                                        </button>
+                                      </td>
+                                    )
+                                  case 'title':
+                                    return (
+                                      <td key={col} title={track.title || track.filename}>
+                                        <strong>{track.title || track.filename}</strong>
+                                      </td>
+                                    )
+                                  case 'artist':
+                                    return (
+                                      <td key={col} title={track.artist}>
+                                        {track.artist || '—'}
+                                      </td>
+                                    )
+                                  case 'album':
+                                    return (
+                                      <td key={col} title={track.album}>
+                                        {track.album || '—'}
+                                      </td>
+                                    )
+                                  case 'rating':
+                                    return (
+                                      <td key={col} onClick={(e) => e.stopPropagation()}>
+                                        <Mp3StarRating
+                                          rating={track.rating || 0}
+                                          onChange={(newRating) =>
+                                            handleSetMp3Rating(
+                                              isSel && selectedTrackIds.length > 1
+                                                ? selectedTrackIds
+                                                : [track.id],
+                                              newRating
+                                            )
+                                          }
+                                        />
+                                      </td>
+                                    )
+                                  case 'duration':
+                                    return (
+                                      <td key={col} style={{ fontFamily: 'var(--font-mono)' }}>
+                                        {formatDuration(track.duration)}
+                                      </td>
+                                    )
+                                  case 'addedAt':
+                                    return (
+                                      <td
+                                        key={col}
+                                        style={{
+                                          fontFamily: 'var(--font-mono)',
+                                          fontSize: 11,
+                                          color: '#8b949e'
+                                        }}
+                                        title={track.addedAt}
+                                      >
+                                        {formatDateAdded(track.addedAt)}
+                                      </td>
+                                    )
+                                  case 'storage':
+                                    return (
+                                      <td key={col}>
+                                        {!track.fileExists ? (
+                                          <span className="badge missing">Missing</span>
+                                        ) : track.isManaged ? (
+                                          <span className="badge managed">Managed</span>
+                                        ) : (
+                                          <span className="badge">External</span>
+                                        )}
+                                      </td>
+                                    )
+                                  case 'filePath':
+                                    return (
+                                      <td
+                                        key={col}
+                                        style={{
+                                          fontFamily: 'var(--font-mono)',
+                                          fontSize: 11,
+                                          color: '#8b949e'
+                                        }}
+                                        title={track.filePath}
+                                      >
+                                        {track.filePath}
+                                      </td>
+                                    )
+                                }
+                              })}
                             </tr>
                           )
                         })}
                       {libVirtual.bottomSpacerHeight > 0 && (
                         <tr aria-hidden="true" style={{ height: libVirtual.bottomSpacerHeight }}>
-                          <td colSpan={7} style={{ padding: 0, border: 'none' }} />
+                          <td colSpan={libColOrder.length} style={{ padding: 0, border: 'none' }} />
                         </tr>
                       )}
                     </tbody>
@@ -2425,14 +3178,29 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
                   overflow: 'hidden'
                 }}
                 onDragOver={(e) => {
-                  if (e.dataTransfer.types.includes('application/x-curationist-track-ids')) {
+                  if (
+                    e.dataTransfer.types.includes('application/x-curationist-track-ids') ||
+                    e.dataTransfer.types.includes('application/x-curationist-playlist-id')
+                  ) {
                     e.preventDefault()
                     e.dataTransfer.dropEffect = 'copy'
                   }
                 }}
                 onDrop={(e) => {
+                  if (!selectedPlaylist) return
+                  const rawPlId = e.dataTransfer.getData('application/x-curationist-playlist-id')
+                  if (rawPlId && rawPlId !== selectedPlaylist.id) {
+                    const sourcePl = state.playlists.find((p) => p.id === rawPlId)
+                    if (sourcePl) {
+                      const trackIds = resolvePlaylistTracks(sourcePl).map((t) => t.id)
+                      if (trackIds.length > 0) {
+                        handleAddTracksToTargetPlaylist(selectedPlaylist, trackIds)
+                      }
+                    }
+                    return
+                  }
                   const raw = e.dataTransfer.getData('application/x-curationist-track-ids')
-                  if (raw && selectedPlaylist) {
+                  if (raw) {
                     try {
                       const ids = JSON.parse(raw) as string[]
                       if (ids.length > 0) {
@@ -2461,15 +3229,15 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
                   </div>
 
                   <div className="playlist-toolbar-center">
-                    {selectedPlaylist?.inActiveJson ? (
-                      <span className="badge synced">In Active saved-playlists.json</span>
+                    {selectedPlaylist && activeObsPlaylist?.id === selectedPlaylist.id ? (
+                      <span className="badge synced">Staged for Active OBS Audio</span>
                     ) : (
                       selectedPlaylist && (
                         <button
                           className="vscode-btn"
                           onClick={() => stagePlaylistInActiveJson(selectedPlaylist.id)}
                         >
-                          <ArrowRight size={11} /> Stage in saved-playlists.json
+                          <ArrowRight size={11} /> Stage for OBS Audio
                         </button>
                       )
                     )}
@@ -2545,116 +3313,63 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
                     <table className="data-table">
                       <thead>
                         <tr>
-                          <th
-                            className="sortable-th"
-                            style={{ width: plColWidths.position }}
-                            onClick={() => cyclePlSort('position')}
-                          >
-                            <div className="th-sort-content">
-                              <span>#</span>
-                              {plSort.col === 'position' && (
-                                <span className="sort-indicator">
-                                  {plSort.dir === 'asc' ? '▲' : '▼'}
-                                </span>
-                              )}
-                            </div>
-                            <div
-                              className="col-resize-handle"
-                              onMouseDown={(e) => startPlColResize('position', e)}
-                            />
-                          </th>
-                          <th style={{ width: plColWidths.play }}>
-                            Play
-                            <div
-                              className="col-resize-handle"
-                              onMouseDown={(e) => startPlColResize('play', e)}
-                            />
-                          </th>
-                          <th
-                            className="sortable-th"
-                            style={{ width: plColWidths.title }}
-                            onClick={() => cyclePlSort('title')}
-                          >
-                            <div className="th-sort-content">
-                              <span>Title</span>
-                              {plSort.col === 'title' && (
-                                <span className="sort-indicator">
-                                  {plSort.dir === 'asc' ? '▲' : '▼'}
-                                </span>
-                              )}
-                            </div>
-                            <div
-                              className="col-resize-handle"
-                              onMouseDown={(e) => startPlColResize('title', e)}
-                            />
-                          </th>
-                          <th
-                            className="sortable-th"
-                            style={{ width: plColWidths.artist }}
-                            onClick={() => cyclePlSort('artist')}
-                          >
-                            <div className="th-sort-content">
-                              <span>Artist</span>
-                              {plSort.col === 'artist' && (
-                                <span className="sort-indicator">
-                                  {plSort.dir === 'asc' ? '▲' : '▼'}
-                                </span>
-                              )}
-                            </div>
-                            <div
-                              className="col-resize-handle"
-                              onMouseDown={(e) => startPlColResize('artist', e)}
-                            />
-                          </th>
-                          <th
-                            className="sortable-th"
-                            style={{ width: plColWidths.show_tags }}
-                            onClick={() => cyclePlSort('show_tags')}
-                          >
-                            <div className="th-sort-content">
-                              <span>Show Tags</span>
-                              {plSort.col === 'show_tags' && (
-                                <span className="sort-indicator">
-                                  {plSort.dir === 'asc' ? '▲' : '▼'}
-                                </span>
-                              )}
-                            </div>
-                            <div
-                              className="col-resize-handle"
-                              onMouseDown={(e) => startPlColResize('show_tags', e)}
-                            />
-                          </th>
-                          <th
-                            className="sortable-th"
-                            style={{ width: plColWidths.value }}
-                            onClick={() => cyclePlSort('value')}
-                          >
-                            <div className="th-sort-content">
-                              <span>File Path (value)</span>
-                              {plSort.col === 'value' && (
-                                <span className="sort-indicator">
-                                  {plSort.dir === 'asc' ? '▲' : '▼'}
-                                </span>
-                              )}
-                            </div>
-                            <div
-                              className="col-resize-handle"
-                              onMouseDown={(e) => startPlColResize('value', e)}
-                            />
-                          </th>
-                          <th style={{ width: plColWidths.dir }}>
-                            Dir
-                            <div
-                              className="col-resize-handle"
-                              onMouseDown={(e) => startPlColResize('dir', e)}
-                            />
-                          </th>
+                          {plColOrder.map((col) => {
+                            const dragProps = getPlHeaderDragProps(col)
+                            if (col === 'play' || col === 'dir') {
+                              return (
+                                <th
+                                  key={col}
+                                  {...dragProps}
+                                  className={dragProps.className}
+                                  style={{ width: plColWidths[col], cursor: 'grab' }}
+                                  title="Drag column header to reorder"
+                                >
+                                  {col === 'play' ? 'Play' : 'Dir'}
+                                  <div
+                                    className="col-resize-handle"
+                                    onMouseDown={(e) => startPlColResize(col, e)}
+                                  />
+                                </th>
+                              )
+                            }
+                            const labelMap: Record<Exclude<MusicPlColKey, 'play' | 'dir'>, string> = {
+                              position: '#',
+                              title: 'Title',
+                              artist: 'Artist',
+                              rating: 'Rating',
+                              show_tags: 'Show Tags',
+                              value: 'File Path (value)'
+                            }
+                            return (
+                              <th
+                                key={col}
+                                {...dragProps}
+                                className={`sortable-th ${dragProps.className}`.trim()}
+                                style={{ width: plColWidths[col], cursor: 'grab' }}
+                                onClick={() => cyclePlSort(col)}
+                                title="Click to sort • Drag column header to reorder"
+                              >
+                                <div className="th-sort-content">
+                                  <span>{labelMap[col]}</span>
+                                  {plSort.col === col && (
+                                    <span className="sort-indicator">
+                                      {plSort.dir === 'asc' ? '▲' : '▼'}
+                                    </span>
+                                  )}
+                                </div>
+                                <div
+                                  className="col-resize-handle"
+                                  onMouseDown={(e) => startPlColResize(col, e)}
+                                />
+                              </th>
+                            )
+                          })}
                         </tr>
                       </thead>
                       <tbody>
                         {plVirtual.topSpacerHeight > 0 && (
                           <tr aria-hidden="true" style={{ height: plVirtual.topSpacerHeight }}>
-                            <td colSpan={7} style={{ padding: 0, border: 'none' }} />
+                            <td colSpan={plColOrder.length} style={{ padding: 0, border: 'none' }} />
                           </tr>
                         )}
                         {sortedPlaylistItems
@@ -2662,6 +3377,10 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
                           .map((item) => {
                             const isSel = selectedPlaylistItemIdSet.has(item.id)
                             const isDragRow = dragOverPlRowId === item.id
+                            const matchedTrack =
+                              (item.trackId && trackLookup.byId.get(item.trackId)) ||
+                              trackLookup.byPath.get(item.value.replace(/\\/g, '/').toLowerCase())
+
                             return (
                               <tr
                                 key={item.id}
@@ -2675,7 +3394,25 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
                                     'application/x-curationist-playlist-item-ids',
                                     JSON.stringify(dragIds)
                                   )
-                                  e.dataTransfer.effectAllowed = 'move'
+                                  // Also attach resolved track IDs so items can be dragged from this playlist into any other playlist in 'All Known Playlists'!
+                                  const dragIdSet = new Set(dragIds)
+                                  const resolvedTrackIds: string[] = []
+                                  for (const it of selectedPlaylist.items || []) {
+                                    if (!dragIdSet.has(it.id)) continue
+                                    const tr =
+                                      (it.trackId && trackLookup.byId.get(it.trackId)) ||
+                                      trackLookup.byPath.get(
+                                        it.value.replace(/\\/g, '/').toLowerCase()
+                                      )
+                                    if (tr) resolvedTrackIds.push(tr.id)
+                                  }
+                                  if (resolvedTrackIds.length > 0) {
+                                    e.dataTransfer.setData(
+                                      'application/x-curationist-track-ids',
+                                      JSON.stringify(resolvedTrackIds)
+                                    )
+                                  }
+                                  e.dataTransfer.effectAllowed = 'copyMove'
                                 }}
                                 onDragOver={(e) => {
                                   if (
@@ -2684,6 +3421,9 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
                                     ) ||
                                     e.dataTransfer.types.includes(
                                       'application/x-curationist-track-ids'
+                                    ) ||
+                                    e.dataTransfer.types.includes(
+                                      'application/x-curationist-playlist-id'
                                     )
                                   ) {
                                     e.preventDefault()
@@ -2723,6 +3463,25 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
                                     }
                                     return
                                   }
+                                  const rawPlId = e.dataTransfer.getData(
+                                    'application/x-curationist-playlist-id'
+                                  )
+                                  if (rawPlId && selectedPlaylist && rawPlId !== selectedPlaylist.id) {
+                                    e.preventDefault()
+                                    e.stopPropagation()
+                                    const sourcePl = state.playlists.find((p) => p.id === rawPlId)
+                                    if (sourcePl) {
+                                      const trackIds = resolvePlaylistTracks(sourcePl).map((t) => t.id)
+                                      if (trackIds.length > 0) {
+                                        await handleAddTracksToTargetPlaylist(
+                                          selectedPlaylist,
+                                          trackIds,
+                                          item.position
+                                        )
+                                      }
+                                    }
+                                    return
+                                  }
                                   const rawTracks = e.dataTransfer.getData(
                                     'application/x-curationist-track-ids'
                                   )
@@ -2746,84 +3505,117 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
                                 onClick={(e) => handlePlaylistItemClick(e, item.id)}
                                 onContextMenu={(e) => handlePlaylistItemContextMenu(e, item)}
                                 onDoubleClick={() => {
-                                  const found =
-                                    (item.trackId && trackLookup.byId.get(item.trackId)) ||
-                                    trackLookup.byPath.get(
-                                      item.value.replace(/\\/g, '/').toLowerCase()
-                                    )
-                                  if (found && selectedPlaylist) {
-                                    onPlayTrack(found, resolvePlaylistTracks(selectedPlaylist))
+                                  if (matchedTrack && selectedPlaylist) {
+                                    onPlayTrack(matchedTrack, resolvePlaylistTracks(selectedPlaylist))
                                   }
                                 }}
                               >
-                                <td style={{ fontFamily: 'var(--font-mono)', color: '#8b949e' }}>
-                                  {item.position + 1}
-                                </td>
-                                <td style={{ textAlign: 'center' }}>
-                                  <button
-                                    className="icon-btn"
-                                    onClick={(e) => {
-                                      e.stopPropagation()
-                                      const found =
-                                        (item.trackId && trackLookup.byId.get(item.trackId)) ||
-                                        trackLookup.byPath.get(
-                                          item.value.replace(/\\/g, '/').toLowerCase()
-                                        )
-                                      if (found && selectedPlaylist) {
-                                        onPlayTrack(found, resolvePlaylistTracks(selectedPlaylist))
-                                      }
-                                    }}
-                                    title="Play Track in Playlist"
-                                  >
-                                    <Play size={11} />
-                                  </button>
-                                </td>
-                                <td>{item.title}</td>
-                                <td>{item.artist}</td>
-                                <td style={{ textAlign: 'center' }}>
-                                  <input
-                                    type="checkbox"
-                                    className="subtle-checkbox"
-                                    checked={item.show_tags}
-                                    onClick={(e) => e.stopPropagation()}
-                                    onChange={async (e) => {
-                                      const next =
-                                        await window.curationist.updateMusicPlaylistItemInline(
-                                          item.id,
-                                          { show_tags: e.target.checked }
-                                        )
-                                      onStateChange(next)
-                                    }}
-                                  />
-                                </td>
-                                <td
-                                  style={{
-                                    fontFamily: 'var(--font-mono)',
-                                    fontSize: 11,
-                                    color: item.fileExists === false ? '#f14c4c' : '#8b949e'
-                                  }}
-                                  title={item.value}
-                                >
-                                  {item.value}
-                                </td>
-                                <td style={{ textAlign: 'center' }}>
-                                  <button
-                                    className="icon-btn"
-                                    title="Reveal in Windows Explorer"
-                                    onClick={(e) => {
-                                      e.stopPropagation()
-                                      window.curationist.showItemInFolder(item.value)
-                                    }}
-                                  >
-                                    <ExternalLink size={11} />
-                                  </button>
-                                </td>
+                                {plColOrder.map((col) => {
+                                  switch (col) {
+                                    case 'position':
+                                      return (
+                                        <td
+                                          key={col}
+                                          style={{ fontFamily: 'var(--font-mono)', color: '#8b949e' }}
+                                        >
+                                          {item.position + 1}
+                                        </td>
+                                      )
+                                    case 'play':
+                                      return (
+                                        <td key={col} style={{ textAlign: 'center' }}>
+                                          <button
+                                            className="icon-btn"
+                                            onClick={(e) => {
+                                              e.stopPropagation()
+                                              if (matchedTrack && selectedPlaylist) {
+                                                onPlayTrack(
+                                                  matchedTrack,
+                                                  resolvePlaylistTracks(selectedPlaylist)
+                                                )
+                                              }
+                                            }}
+                                            title="Play Track in Playlist"
+                                          >
+                                            <Play size={11} />
+                                          </button>
+                                        </td>
+                                      )
+                                    case 'title':
+                                      return <td key={col}>{item.title}</td>
+                                    case 'artist':
+                                      return <td key={col}>{item.artist}</td>
+                                    case 'rating':
+                                      return (
+                                        <td key={col} onClick={(e) => e.stopPropagation()}>
+                                          {matchedTrack ? (
+                                            <Mp3StarRating
+                                              rating={matchedTrack.rating || 0}
+                                              onChange={(newRating) =>
+                                                handleSetMp3Rating([matchedTrack.id], newRating)
+                                              }
+                                            />
+                                          ) : (
+                                            <span style={{ color: '#6e7681', fontSize: 11 }}>—</span>
+                                          )}
+                                        </td>
+                                      )
+                                    case 'show_tags':
+                                      return (
+                                        <td key={col} style={{ textAlign: 'center' }}>
+                                          <input
+                                            type="checkbox"
+                                            className="subtle-checkbox"
+                                            checked={item.show_tags}
+                                            onClick={(e) => e.stopPropagation()}
+                                            onChange={async (e) => {
+                                              const next =
+                                                await window.curationist.updateMusicPlaylistItemInline(
+                                                  item.id,
+                                                  { show_tags: e.target.checked }
+                                                )
+                                              onStateChange(next)
+                                            }}
+                                          />
+                                        </td>
+                                      )
+                                    case 'value':
+                                      return (
+                                        <td
+                                          key={col}
+                                          style={{
+                                            fontFamily: 'var(--font-mono)',
+                                            fontSize: 11,
+                                            color: item.fileExists === false ? '#f14c4c' : '#8b949e'
+                                          }}
+                                          title={item.value}
+                                        >
+                                          {item.value}
+                                        </td>
+                                      )
+                                    case 'dir':
+                                      return (
+                                        <td key={col} style={{ textAlign: 'center' }}>
+                                          <button
+                                            className="icon-btn"
+                                            title="Reveal in Windows Explorer"
+                                            onClick={(e) => {
+                                              e.stopPropagation()
+                                              window.curationist.showItemInFolder(item.value)
+                                            }}
+                                          >
+                                            <ExternalLink size={11} />
+                                          </button>
+                                        </td>
+                                      )
+                                  }
+                                })}
                               </tr>
                             )
                           })}
                         {plVirtual.bottomSpacerHeight > 0 && (
                           <tr aria-hidden="true" style={{ height: plVirtual.bottomSpacerHeight }}>
-                            <td colSpan={7} style={{ padding: 0, border: 'none' }} />
+                            <td colSpan={plColOrder.length} style={{ padding: 0, border: 'none' }} />
                           </tr>
                         )}
                       </tbody>
@@ -2855,6 +3647,123 @@ export const MusicWorkspace: React.FC<MusicWorkspaceProps> = ({
           entries={contextMenu.entries}
           onClose={() => setContextMenu(null)}
         />
+      )}
+
+      {/* Multi-line <SYNCED LYRICS> Editor Modal */}
+      {syncedLyricsModalOpen && inspectedTracks.length === 1 && (
+        <div className="modal-backdrop" onClick={() => setSyncedLyricsModalOpen(false)}>
+          <div
+            className="modal-window"
+            style={{ width: 620, maxWidth: '94vw' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-header">
+              <span>
+                &lt;SYNCED LYRICS&gt; Multi-Line Editor —{' '}
+                {inspectedTracks[0].title || inspectedTracks[0].filename}
+              </span>
+              <button
+                type="button"
+                className="icon-btn"
+                onClick={() => setSyncedLyricsModalOpen(false)}
+                title="Close"
+              >
+                <X size={14} />
+              </button>
+            </div>
+            <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <div style={{ fontSize: 11.5, color: '#9ca3af', lineHeight: 1.5 }}>
+                Edit the ID3 <code>&lt;SYNCED LYRICS&gt;</code> tag (LRC format, e.g.{' '}
+                <code>[00:12.40]First line of lyrics...</code>). Changes here update the Metadata
+                Inspector form and can be saved directly to the MP3 file on disk.
+              </div>
+              <textarea
+                className="vscode-input"
+                autoFocus
+                rows={16}
+                style={{
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 12,
+                  lineHeight: 1.55,
+                  resize: 'vertical',
+                  minHeight: 260,
+                  whiteSpace: 'pre'
+                }}
+                placeholder="[00:00.00]Enter or paste LRC-formatted <SYNCED LYRICS> lines here..."
+                value={tagForm.syncedLyrics}
+                onChange={(e) => setTagForm({ ...tagForm, syncedLyrics: e.target.value })}
+              />
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  fontSize: 11,
+                  color: '#8b949e'
+                }}
+              >
+                <span>
+                  {
+                    (tagForm.syncedLyrics || '')
+                      .split(/\r?\n/)
+                      .filter((l) => l.trim().length > 0).length
+                  }{' '}
+                  non-empty line(s)
+                </span>
+                <button
+                  type="button"
+                  className="vscode-btn"
+                  onClick={() => setTagForm({ ...tagForm, syncedLyrics: '' })}
+                  disabled={!tagForm.syncedLyrics}
+                >
+                  Clear Lyrics
+                </button>
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button
+                type="button"
+                className="vscode-btn"
+                onClick={() => setSyncedLyricsModalOpen(false)}
+              >
+                Apply to Form
+              </button>
+              <button
+                type="button"
+                className="vscode-btn primary"
+                disabled={busy}
+                onClick={async () => {
+                  setSyncedLyricsModalOpen(false)
+                  setBusy(true)
+                  try {
+                    const res = await window.curationist.updateMp3Tags({
+                      trackIds: [inspectedTracks[0].id],
+                      artist: tagForm.artist,
+                      title: tagForm.title,
+                      album: tagForm.album,
+                      year: tagForm.year,
+                      genre: tagForm.genre,
+                      trackNumber: tagForm.trackNumber,
+                      comment: tagForm.comment,
+                      syncedLyrics: tagForm.syncedLyrics,
+                      rating: tagForm.rating ?? 0,
+                      showTags: tagForm.showTags,
+                      writeToFile: true
+                    })
+                    onStateChange(res.state)
+                    onNotify('Saved <SYNCED LYRICS> and ID3 tags to MP3 file')
+                  } catch (err: any) {
+                    onNotify(`Failed to save <SYNCED LYRICS>: ${err?.message || err}`)
+                  } finally {
+                    setBusy(false)
+                  }
+                }}
+              >
+                <Save size={12} /> Save Directly to MP3 &amp; Library
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Permanent Disk Deletion Confirmation Modal */}

@@ -5,11 +5,24 @@ import type {
   LogEntry,
   LogLevel,
   LogsSnapshot,
+  Mp3DetailedMetadata,
   Mp3TagUpdatePayload,
   MusicWorkspaceState,
+  ObsAudioDriver,
+  ObsAudioSettings,
+  ObsConnectionState,
+  ObsControlPayload,
+  ObsPluginInstallResult,
+  ObsPluginStatus,
+  ObsQueue,
+  ObsQueuePublishMode,
+  ObsSource,
+  ObsStatus,
+  ObsVideoSettings,
   PresetInspectionResult,
   PresetWorkspaceState,
-  PreviewPresetResult
+  PreviewPresetResult,
+  VideoWorkspaceState
 } from '../src/types'
 
 const api = {
@@ -116,6 +129,23 @@ const api = {
   updateMp3Tags: (payload: Mp3TagUpdatePayload) =>
     ipcRenderer.invoke('music:updateTags', payload) as Promise<{
       updated: number
+      errors: string[]
+      state: MusicWorkspaceState
+    }>,
+  setMp3TracksRating: (trackIds: string[], rating: number) =>
+    ipcRenderer.invoke('music:setRating', trackIds, rating) as Promise<{
+      updated: number
+      errors: string[]
+      state: MusicWorkspaceState
+    }>,
+  inspectMp3TrackMetadata: (trackId: string) =>
+    ipcRenderer.invoke('music:inspectTrackMetadata', trackId) as Promise<{
+      detail: Mp3DetailedMetadata | null
+      state: MusicWorkspaceState
+    }>,
+  refreshMp3Metadata: (trackIds?: string[]) =>
+    ipcRenderer.invoke('music:refreshMetadata', trackIds) as Promise<{
+      refreshed: number
       errors: string[]
       state: MusicWorkspaceState
     }>,
@@ -256,7 +286,186 @@ const api = {
     }>,
   discardPresetDraft: () =>
     ipcRenderer.invoke('presets:discardDraft') as Promise<PresetWorkspaceState>,
-  getProjectMPort: () => ipcRenderer.invoke('projectm:getPort') as Promise<number>
+  getProjectMPort: () => ipcRenderer.invoke('projectm:getPort') as Promise<number>,
+
+  // milkLab Preset IDE Integration
+  openMilkLab: (options: { mode: 'new' | 'edit'; presetId?: string; libraryId?: string }) =>
+    ipcRenderer.invoke('milklab:open', options) as Promise<{ ok: boolean; message: string }>,
+  onPresetStateChanged: (cb: (state: PresetWorkspaceState) => void): (() => void) => {
+    const handler = (_e: unknown, state: PresetWorkspaceState) => cb(state)
+    ipcRenderer.on('curationist:preset-state-changed', handler)
+    return () => {
+      ipcRenderer.removeListener('curationist:preset-state-changed', handler)
+    }
+  },
+
+  // OBS Integration (milkyWay Audio & milkyWay Video)
+  getObsConnectionState: () =>
+    ipcRenderer.invoke('obs:getConnectionState') as Promise<ObsConnectionState>,
+  connectObs: (endpoint?: string, password?: string) =>
+    ipcRenderer.invoke('obs:connect', endpoint, password) as Promise<ObsConnectionState>,
+  disconnectObs: () => ipcRenderer.invoke('obs:disconnect') as Promise<ObsConnectionState>,
+  refreshObsSources: () => ipcRenderer.invoke('obs:refreshSources') as Promise<ObsSource[]>,
+  getObsSourceStatus: (sourceId: string) =>
+    ipcRenderer.invoke('obs:getSourceStatus', sourceId) as Promise<ObsStatus>,
+  getObsSourceQueue: (sourceId: string) =>
+    ipcRenderer.invoke('obs:getSourceQueue', sourceId) as Promise<ObsQueue>,
+  controlObsSource: (control: ObsControlPayload) =>
+    ipcRenderer.invoke('obs:controlSource', control) as Promise<ObsStatus>,
+  setObsPlaybackModes: (
+    sourceId: string,
+    loop: boolean,
+    shuffle: boolean,
+    advanceOnSongChange?: boolean,
+    crossfadeSec?: number
+  ) =>
+    ipcRenderer.invoke(
+      'obs:setPlaybackModes',
+      sourceId,
+      loop,
+      shuffle,
+      advanceOnSongChange,
+      crossfadeSec
+    ) as Promise<ObsStatus>,
+  setObsPresetTiming: (
+    sourceId: string,
+    intervalMs: number,
+    autoAdvance: boolean,
+    advanceOnSongChange?: boolean
+  ) =>
+    ipcRenderer.invoke(
+      'obs:setPresetTiming',
+      sourceId,
+      intervalMs,
+      autoAdvance,
+      advanceOnSongChange
+    ) as Promise<ObsStatus>,
+  getObsAudioSettings: (sourceId: string) =>
+    ipcRenderer.invoke('obs:getAudioSettings', sourceId) as Promise<ObsAudioSettings>,
+  setObsAudioSettings: (settings: ObsAudioSettings) =>
+    ipcRenderer.invoke('obs:setAudioSettings', settings) as Promise<ObsAudioSettings>,
+  getObsVideoSettings: (sourceId: string) =>
+    ipcRenderer.invoke('obs:getVideoSettings', sourceId) as Promise<ObsVideoSettings>,
+  setObsVideoSettings: (settings: ObsVideoSettings) =>
+    ipcRenderer.invoke('obs:setVideoSettings', settings) as Promise<ObsVideoSettings>,
+  getObsAudioDrivers: (sourceId: string) =>
+    ipcRenderer.invoke('obs:getAudioDrivers', sourceId) as Promise<ObsAudioDriver[]>,
+  publishObsAudioQueue: (options?: {
+    sourceId?: string
+    playlistId?: string
+    trackIds?: string[]
+    mode?: ObsQueuePublishMode
+  }) =>
+    ipcRenderer.invoke('obs:publishAudioQueue', options) as Promise<{
+      publishedSources: number
+      itemCount: number
+    }>,
+  publishObsClipQueue: (options?: {
+    sourceId?: string
+    playlistId?: string
+    clipIds?: string[]
+    mode?: ObsQueuePublishMode
+  }) =>
+    ipcRenderer.invoke('obs:publishClipQueue', options) as Promise<{
+      publishedSources: number
+      itemCount: number
+    }>,
+  publishObsVideoQueue: (options?: {
+    sourceId?: string
+    playlistId?: string
+    presetIds?: string[]
+    mode?: ObsQueuePublishMode
+  }) =>
+    ipcRenderer.invoke('obs:publishVideoQueue', options) as Promise<{
+      publishedSources: number
+      itemCount: number
+    }>,
+  resolveObsPublishedAssetPath: (relativeAsset: string) =>
+    ipcRenderer.invoke('obs:resolvePublishedAssetPath', relativeAsset) as Promise<string>,
+  getObsPluginStatus: () =>
+    ipcRenderer.invoke('obs:getPluginStatus') as Promise<ObsPluginStatus>,
+  selectObsExecutable: () =>
+    ipcRenderer.invoke('obs:selectObsExecutable') as Promise<ObsPluginStatus>,
+  installObsPlugin: () =>
+    ipcRenderer.invoke('obs:installPlugin') as Promise<ObsPluginInstallResult>,
+
+  // Video Studio (Curationist Video Libraries & Playlists)
+  getVideoState: () => ipcRenderer.invoke('video:getState') as Promise<VideoWorkspaceState>,
+  createVideoLibrary: (name: string, desc?: string) =>
+    ipcRenderer.invoke('video:createLibrary', name, desc) as Promise<VideoWorkspaceState>,
+  renameVideoLibrary: (id: string, name: string) =>
+    ipcRenderer.invoke('video:renameLibrary', id, name) as Promise<VideoWorkspaceState>,
+  deleteVideoLibrary: (id: string) =>
+    ipcRenderer.invoke('video:deleteLibrary', id) as Promise<VideoWorkspaceState>,
+  importVideoMedia: (
+    paths: string[],
+    libraryId: string,
+    copyToManaged: boolean,
+    options?: { targetFolderPath?: string; move?: boolean }
+  ) =>
+    ipcRenderer.invoke('video:importMedia', paths, libraryId, copyToManaged, options) as Promise<{
+      batch: ImportBatchResult
+      state: VideoWorkspaceState
+    }>,
+  copyVideoClipsToManaged: (
+    clipIds: string[],
+    options?: { targetFolderPath?: string; move?: boolean }
+  ) =>
+    ipcRenderer.invoke('video:copyToManaged', clipIds, options) as Promise<{
+      copied: number
+      state: VideoWorkspaceState
+    }>,
+  removeVideoClips: (clipIds: string[]) =>
+    ipcRenderer.invoke('video:removeClips', clipIds) as Promise<VideoWorkspaceState>,
+  deleteVideoClipsFromDisk: (clipIds: string[]) =>
+    ipcRenderer.invoke('video:deleteClipsFromDisk', clipIds) as Promise<{
+      deletedFiles: number
+      removedClips: number
+      state: VideoWorkspaceState
+    }>,
+  setVideoClipsRating: (clipIds: string[], rating: number) =>
+    ipcRenderer.invoke('video:setRating', clipIds, rating) as Promise<VideoWorkspaceState>,
+  updateVideoClipMetadata: (payload: {
+    clipId: string
+    title?: string
+    artist?: string
+    duration?: number
+  }) => ipcRenderer.invoke('video:updateMetadata', payload) as Promise<VideoWorkspaceState>,
+  createVideoPlaylist: (name: string, makeActive = false) =>
+    ipcRenderer.invoke('video:createPlaylist', name, makeActive) as Promise<{
+      newId: string
+      state: VideoWorkspaceState
+    }>,
+  renameVideoPlaylist: (id: string, newName: string) =>
+    ipcRenderer.invoke('video:renamePlaylist', id, newName) as Promise<VideoWorkspaceState>,
+  duplicateVideoPlaylist: (id: string) =>
+    ipcRenderer.invoke('video:duplicatePlaylist', id) as Promise<{
+      newId: string
+      state: VideoWorkspaceState
+    }>,
+  deleteVideoPlaylist: (id: string) =>
+    ipcRenderer.invoke('video:deletePlaylist', id) as Promise<VideoWorkspaceState>,
+  setActiveVideoPlaylist: (id: string) =>
+    ipcRenderer.invoke('video:setActivePlaylist', id) as Promise<VideoWorkspaceState>,
+  addClipsToVideoPlaylist: (playlistId: string, clipIds: string[], pos?: number) =>
+    ipcRenderer.invoke('video:addClipsToPlaylist', playlistId, clipIds, pos) as Promise<VideoWorkspaceState>,
+  removeItemsFromVideoPlaylist: (playlistId: string, itemIds: string[]) =>
+    ipcRenderer.invoke('video:removeItemsFromPlaylist', playlistId, itemIds) as Promise<VideoWorkspaceState>,
+  deleteVideoPlaylistItemsFromDisk: (playlistId: string, itemIds: string[]) =>
+    ipcRenderer.invoke('video:deletePlaylistItemsFromDisk', playlistId, itemIds) as Promise<{
+      deletedFiles: number
+      removedItems: number
+      state: VideoWorkspaceState
+    }>,
+  reorderVideoPlaylistItems: (playlistId: string, orderedIds: string[]) =>
+    ipcRenderer.invoke('video:reorderPlaylistItems', playlistId, orderedIds) as Promise<VideoWorkspaceState>,
+  publishVideoPlaylists: () =>
+    ipcRenderer.invoke('video:publish') as Promise<{
+      playlistName: string
+      itemCount: number
+      publishedSources: number
+      state: VideoWorkspaceState
+    }>
 }
 
 contextBridge.exposeInMainWorld('curationist', api)

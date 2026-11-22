@@ -1,5 +1,6 @@
 param(
-    [switch] $BuildInstaller = $true
+    [switch] $BuildInstaller = $true,
+    [switch] $NoBump = $false
 )
 
 $ErrorActionPreference = "Stop"
@@ -48,6 +49,14 @@ $normDist = ([System.IO.Path]::GetFullPath($distDir).TrimEnd('\') + '\').ToLower
 $normStage = ([System.IO.Path]::GetFullPath($stageDir).TrimEnd('\') + '\').ToLowerInvariant()
 if ($normStage.StartsWith($normDist)) {
     throw "Staging directory ($stageDir) must never be inside Vite output directory ($distDir)."
+}
+
+# Automatically bump patch version in package.json, installer/curationist.iss, and vendor/obs-plugin/milkyway-install.json
+if (-not $NoBump) {
+    node (Join-Path $PSScriptRoot "bump-version.mjs")
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to bump version."
+    }
 }
 
 Write-Host "==> 1. Building Curationist Vite + Electron bundles..." -ForegroundColor Cyan
@@ -127,6 +136,14 @@ if (Test-Path -LiteralPath $assetsDir) {
     }
 }
 
+$iconsDir = Join-Path $distDir "icons"
+if (Test-Path -LiteralPath $iconsDir) {
+    robocopy $iconsDir (Join-Path $stagedDistDir "icons") /E /MT:8 /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
+    if ($LASTEXITCODE -ge 8) {
+        throw "Failed to copy renderer icons."
+    }
+}
+
 robocopy $distElectronDir $stagedDistElectronDir /E /MT:8 /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
 if ($LASTEXITCODE -ge 8) {
     throw "Failed to copy dist-electron bundle."
@@ -140,6 +157,30 @@ if (Test-Path -LiteralPath $nativeProjectMDir) {
     New-Item -ItemType Directory -Path $stagedProjectMDir -Force | Out-Null
     Copy-Item (Join-Path $nativeProjectMDir "curationist-projectm.exe") -Destination $stagedProjectMDir -Force
     Copy-Item (Join-Path $nativeProjectMDir "projectM-4.dll") -Destination $stagedProjectMDir -Force
+}
+
+# Copy bundled milkLab IDE renderer & preload to resources\milklab
+$vendorMilkLabDir = Join-Path $repoRoot "vendor\milklab"
+$stagedMilkLabDir = Join-Path $stageDir "resources\milklab"
+if (Test-Path -LiteralPath $vendorMilkLabDir) {
+    Write-Host "==> Staging bundled milkLab Preset IDE into resources\milklab..." -ForegroundColor Cyan
+    New-Item -ItemType Directory -Path $stagedMilkLabDir -Force | Out-Null
+    robocopy $vendorMilkLabDir $stagedMilkLabDir /E /MT:8 /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
+    if ($LASTEXITCODE -ge 8) {
+        throw "Failed to copy milkLab assets."
+    }
+}
+
+# Copy bundled milkyWay OBS Plugin (milkyWay Audio & milkyWay Video) to resources\obs-plugin
+$vendorObsPluginDir = Join-Path $repoRoot "vendor\obs-plugin"
+$stagedObsPluginDir = Join-Path $stageDir "resources\obs-plugin"
+if (Test-Path -LiteralPath $vendorObsPluginDir) {
+    Write-Host "==> Staging milkyWay OBS Plugin payload into resources\obs-plugin..." -ForegroundColor Cyan
+    New-Item -ItemType Directory -Path $stagedObsPluginDir -Force | Out-Null
+    robocopy $vendorObsPluginDir $stagedObsPluginDir /E /MT:8 /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
+    if ($LASTEXITCODE -ge 8) {
+        throw "Failed to copy obs-plugin payload."
+    }
 }
 
 $prodPkg = [ordered]@{

@@ -1,5 +1,5 @@
 #define MyAppName "Curationist"
-#define MyAppVersion "1.2.0"
+#define MyAppVersion "1.2.4"
 #define MyAppPublisher "sorryneedboost.com"
 #define MyAppURL "https://sorryneedboost.com"
 #define MyAppExeName "Curationist.exe"

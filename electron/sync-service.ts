@@ -11,12 +11,14 @@ import {
   invalidateFileExistsCache,
   invalidateMusicLibraryCache,
   invalidatePresetLibraryCache,
+  invalidateVideoLibraryCache,
   setDomainModified,
+  updateMp3RatingInMemoryCache,
   updatePresetRatingInMemoryCache,
   withTransaction
 } from './db'
 import { logEvent } from './logger'
-import { extractMp3Metadata, writeMp3Id3Tags } from './mp3-metadata'
+import { extractMp3Metadata, getFirstSyncedLyricsLine, writeMp3Id3Tags } from './mp3-metadata'
 import {
   canonicalizePresetPath,
   preparePresetFileForLibrary,
@@ -25,6 +27,7 @@ import {
 } from './preset-import'
 import type {
   ImportBatchResult,
+  Mp3DetailedMetadata,
   Mp3TagUpdatePayload,
   PresetInspectionResult,
   PreviewPresetResult
@@ -386,6 +389,11 @@ export async function importMp3FilesOrFolders(
       cover_art_mime, cover_art_base64, added_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
   `)
+  const insertMetaStmt = d.prepare(`
+    INSERT OR REPLACE INTO mp3_track_meta (
+      track_id, rating, added_at, synced_lyrics, unsynced_lyrics, comment, channels, codec, file_size
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `)
 
   for (const srcPath of files) {
     const normSrc = srcPath.replace(/\\/g, '/')
@@ -405,6 +413,7 @@ export async function importMp3FilesOrFolders(
 
       const meta = await extractMp3Metadata(targetPath)
       const trackId = `mp3-${crypto.randomUUID()}`
+      const addedAt = new Date().toISOString()
       insertStmt.run(
         trackId,
         libraryId,
@@ -423,7 +432,18 @@ export async function importMp3FilesOrFolders(
         meta.sampleRate,
         meta.coverArtMime,
         meta.coverArtBase64,
-        new Date().toISOString()
+        addedAt
+      )
+      insertMetaStmt.run(
+        trackId,
+        meta.rating,
+        addedAt,
+        meta.syncedLyrics,
+        meta.unsyncedLyrics,
+        meta.comment,
+        meta.channels,
+        meta.codec,
+        meta.fileSize
       )
       existingSet.add(normSrc.toLowerCase())
       existingSet.add(targetPath.toLowerCase())
@@ -694,6 +714,16 @@ export function updateMp3Tags(payload: Mp3TagUpdatePayload): { updated: number; 
     JOIN music_playlists p ON p.id = i.playlist_id
     WHERE p.in_active_json = 1 AND (i.track_id = ? OR LOWER(REPLACE(i.value, '\\', '/')) = ?)
   `)
+  const getMetaStmt = d.prepare(`SELECT * FROM mp3_track_meta WHERE track_id = ?`)
+  const upsertMetaStmt = d.prepare(`
+    INSERT INTO mp3_track_meta (track_id, rating, added_at, synced_lyrics, unsynced_lyrics, comment, channels, codec, file_size)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(track_id) DO UPDATE SET
+      rating = excluded.rating,
+      synced_lyrics = excluded.synced_lyrics,
+      unsynced_lyrics = excluded.unsynced_lyrics,
+      comment = excluded.comment
+  `)
 
   withTransaction(() => {
     for (const trackId of payload.trackIds) {
@@ -709,6 +739,20 @@ export function updateMp3Tags(payload: Mp3TagUpdatePayload): { updated: number; 
       const nextShowTags =
         payload.showTags !== undefined ? (payload.showTags ? 1 : 0) : Number(row.show_tags)
 
+      const curMeta = (getMetaStmt.get(trackId) as any) || {}
+      const nextRating =
+        payload.rating !== undefined
+          ? Math.max(0, Math.min(5, Math.round(Number(payload.rating) || 0)))
+          : Number(curMeta.rating || 0)
+      const nextSyncedLyrics =
+        payload.syncedLyrics !== undefined ? payload.syncedLyrics : String(curMeta.synced_lyrics || '')
+      const nextUnsyncedLyrics =
+        payload.unsyncedLyrics !== undefined
+          ? payload.unsyncedLyrics
+          : String(curMeta.unsynced_lyrics || '')
+      const nextComment =
+        payload.comment !== undefined ? payload.comment : String(curMeta.comment || '')
+
       if (payload.writeToFile && fs.existsSync(row.file_path)) {
         const writeRes = writeMp3Id3Tags(row.file_path, {
           artist: nextArtist,
@@ -717,6 +761,10 @@ export function updateMp3Tags(payload: Mp3TagUpdatePayload): { updated: number; 
           year: nextYear,
           genre: nextGenre,
           trackNumber: nextTrackNum,
+          rating: payload.rating !== undefined ? nextRating : undefined,
+          comment: payload.comment !== undefined ? nextComment : undefined,
+          unsyncedLyrics: payload.unsyncedLyrics !== undefined ? nextUnsyncedLyrics : undefined,
+          syncedLyrics: payload.syncedLyrics !== undefined ? nextSyncedLyrics : undefined,
           coverArtBase64: payload.coverArtBase64 !== undefined ? payload.coverArtBase64 : undefined,
           coverArtMime: payload.coverArtMime !== undefined ? payload.coverArtMime : undefined
         })
@@ -724,6 +772,18 @@ export function updateMp3Tags(payload: Mp3TagUpdatePayload): { updated: number; 
           errors.push(`${row.filename}: ${writeRes.error}`)
         }
       }
+
+      upsertMetaStmt.run(
+        trackId,
+        nextRating,
+        curMeta.added_at || new Date().toISOString(),
+        nextSyncedLyrics,
+        nextUnsyncedLyrics,
+        nextComment,
+        Number(curMeta.channels || 2),
+        curMeta.codec || 'MP3',
+        Number(curMeta.file_size || 0)
+      )
 
       if (payload.coverArtBase64 !== undefined) {
         updateWithArt.run(
@@ -769,6 +829,288 @@ export function updateMp3Tags(payload: Mp3TagUpdatePayload): { updated: number; 
   }
 
   return { updated, errors }
+}
+
+export function setMp3TracksRating(
+  trackIds: string[],
+  rating: number
+): { updated: number; errors: string[] } {
+  if (trackIds.length === 0) return { updated: 0, errors: [] }
+  const clamped = Math.max(0, Math.min(5, Math.round(Number(rating) || 0)))
+  const d = getDb()
+  const now = new Date().toISOString()
+  let updated = 0
+  const errors: string[] = []
+
+  const getTrack = d.prepare(`SELECT id, file_path, filename FROM mp3_tracks WHERE id = ?`)
+  const upsertMeta = d.prepare(`
+    INSERT INTO mp3_track_meta (track_id, rating, added_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(track_id) DO UPDATE SET rating = excluded.rating
+  `)
+
+  withTransaction(() => {
+    for (const trackId of trackIds) {
+      const row = getTrack.get(trackId) as { id: string; file_path: string; filename: string } | undefined
+      if (!row) continue
+      upsertMeta.run(trackId, clamped, now)
+      if (row.file_path && fs.existsSync(row.file_path)) {
+        const writeRes = writeMp3Id3Tags(row.file_path, { rating: clamped })
+        if (!writeRes.ok && writeRes.error) {
+          errors.push(`${row.filename}: ${writeRes.error}`)
+        }
+      }
+      updated++
+    }
+  })
+
+  updateMp3RatingInMemoryCache(trackIds, clamped)
+  return { updated, errors }
+}
+
+export async function inspectMp3TrackDetailedMetadata(
+  trackId: string
+): Promise<Mp3DetailedMetadata | null> {
+  const d = getDb()
+  const row = d
+    .prepare(
+      `SELECT t.id, t.file_path, t.filename, t.artist, t.title, t.album, t.year, t.genre,
+              t.track_number, t.duration, t.bitrate, t.sample_rate,
+              COALESCE(tm.rating, 0) as rating,
+              COALESCE(tm.added_at, '') as added_at,
+              COALESCE(tm.synced_lyrics, '') as synced_lyrics,
+              COALESCE(tm.unsynced_lyrics, '') as unsynced_lyrics,
+              COALESCE(tm.comment, '') as comment,
+              COALESCE(tm.channels, 2) as channels,
+              COALESCE(tm.codec, 'MP3') as codec,
+              COALESCE(tm.file_size, 0) as file_size
+       FROM mp3_tracks t
+       LEFT JOIN mp3_track_meta tm ON tm.track_id = t.id
+       WHERE t.id = ?`
+    )
+    .get(trackId) as any
+  if (!row) return null
+
+  let artist = String(row.artist || '')
+  let title = String(row.title || '')
+  let album = String(row.album || '')
+  let year = String(row.year || '')
+  let genre = String(row.genre || '')
+  let trackNumber = String(row.track_number || '')
+  let duration = Number(row.duration || 0)
+  let bitrate = Number(row.bitrate || 0)
+  let sampleRate = Number(row.sample_rate || 0)
+  let rating = Number(row.rating || 0)
+  let rawRatingTag = ''
+  let rawStarsTag = ''
+  let channels = Number(row.channels || 2)
+  let codec = String(row.codec || 'MP3')
+  let tagTypes = 'ID3v2'
+  let fileSize = Number(row.file_size || 0)
+  let addedAt = String(row.added_at || '')
+  let comment = String(row.comment || '')
+  let unsyncedLyrics = String(row.unsynced_lyrics || '')
+  let syncedLyrics = String(row.synced_lyrics || '')
+
+  if (row.file_path && fs.existsSync(row.file_path)) {
+    try {
+      const extracted = await extractMp3Metadata(row.file_path, { skipCovers: true })
+      rawRatingTag = extracted.rawRatingTag
+      rawStarsTag = extracted.rawStarsTag
+      tagTypes = extracted.tagTypes || 'ID3v2'
+      fileSize = extracted.fileSize || fileSize
+      channels = extracted.channels || channels
+      codec = extracted.codec || codec
+      if (!comment && extracted.comment) comment = extracted.comment
+      if (!unsyncedLyrics && extracted.unsyncedLyrics) unsyncedLyrics = extracted.unsyncedLyrics
+      if (!syncedLyrics && extracted.syncedLyrics) syncedLyrics = extracted.syncedLyrics
+      if (rating === 0 && extracted.rating > 0) rating = extracted.rating
+
+      let needDbTrackUpdate = false
+      if (!duration && extracted.duration > 0) {
+        duration = extracted.duration
+        needDbTrackUpdate = true
+      }
+      if (!bitrate && extracted.bitrate > 0) {
+        bitrate = extracted.bitrate
+        needDbTrackUpdate = true
+      }
+      if (!sampleRate && extracted.sampleRate > 0) {
+        sampleRate = extracted.sampleRate
+        needDbTrackUpdate = true
+      }
+      if (!year && extracted.year) {
+        year = extracted.year
+        needDbTrackUpdate = true
+      }
+      if (!album && extracted.album) {
+        album = extracted.album
+        needDbTrackUpdate = true
+      }
+      if (!genre && extracted.genre) {
+        genre = extracted.genre
+        needDbTrackUpdate = true
+      }
+      if (!trackNumber && extracted.trackNumber) {
+        trackNumber = extracted.trackNumber
+        needDbTrackUpdate = true
+      }
+
+      if (needDbTrackUpdate) {
+        d.prepare(
+          `UPDATE mp3_tracks
+           SET album = ?, year = ?, genre = ?, track_number = ?, duration = ?, bitrate = ?, sample_rate = ?
+           WHERE id = ?`
+        ).run(album, year, genre, trackNumber, duration, bitrate, sampleRate, trackId)
+        invalidateMusicLibraryCache()
+      }
+
+      d.prepare(
+        `INSERT INTO mp3_track_meta (track_id, rating, added_at, synced_lyrics, unsynced_lyrics, comment, channels, codec, file_size)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(track_id) DO UPDATE SET
+           rating = excluded.rating,
+           synced_lyrics = excluded.synced_lyrics,
+           unsynced_lyrics = excluded.unsynced_lyrics,
+           comment = excluded.comment,
+           channels = excluded.channels,
+           codec = excluded.codec,
+           file_size = excluded.file_size`
+      ).run(
+        trackId,
+        rating,
+        addedAt || new Date().toISOString(),
+        syncedLyrics,
+        unsyncedLyrics,
+        comment,
+        channels,
+        codec,
+        fileSize
+      )
+      updateMp3RatingInMemoryCache([trackId], rating)
+    } catch {
+      // ignore disk parse error
+    }
+  }
+
+  const firstLine = getFirstSyncedLyricsLine(syncedLyrics)
+  return {
+    trackId,
+    filePath: row.file_path,
+    artist,
+    title,
+    album,
+    year,
+    genre,
+    trackNumber,
+    rating,
+    rawRatingTag,
+    rawStarsTag,
+    duration,
+    bitrate,
+    sampleRate,
+    channels,
+    codec,
+    tagTypes,
+    fileSize,
+    addedAt,
+    comment,
+    unsyncedLyrics,
+    syncedLyrics,
+    hasSyncedLyrics: Boolean(syncedLyrics && syncedLyrics.trim()),
+    syncedLyricsFirstLine: firstLine
+  }
+}
+
+export async function refreshMp3TracksMetadata(
+  trackIds?: string[]
+): Promise<{ refreshed: number; errors: string[] }> {
+  const d = getDb()
+  let rows: Array<{ id: string; file_path: string; filename: string }> = []
+  if (trackIds && trackIds.length > 0) {
+    const getOne = d.prepare(`SELECT id, file_path, filename FROM mp3_tracks WHERE id = ?`)
+    for (const id of trackIds) {
+      const r = getOne.get(id) as { id: string; file_path: string; filename: string } | undefined
+      if (r) rows.push(r)
+    }
+  } else {
+    rows = d.prepare(`SELECT id, file_path, filename FROM mp3_tracks`).all() as Array<{
+      id: string
+      file_path: string
+      filename: string
+    }>
+  }
+
+  const updateTrack = d.prepare(`
+    UPDATE mp3_tracks
+    SET artist = CASE WHEN ? != '' THEN ? ELSE artist END,
+        title = CASE WHEN ? != '' THEN ? ELSE title END,
+        album = ?,
+        year = ?,
+        genre = ?,
+        track_number = ?,
+        duration = ?,
+        bitrate = ?,
+        sample_rate = ?
+    WHERE id = ?
+  `)
+  const upsertMeta = d.prepare(`
+    INSERT INTO mp3_track_meta (track_id, rating, added_at, synced_lyrics, unsynced_lyrics, comment, channels, codec, file_size)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(track_id) DO UPDATE SET
+      rating = excluded.rating,
+      synced_lyrics = excluded.synced_lyrics,
+      unsynced_lyrics = excluded.unsynced_lyrics,
+      comment = excluded.comment,
+      channels = excluded.channels,
+      codec = excluded.codec,
+      file_size = excluded.file_size
+  `)
+
+  let refreshed = 0
+  const errors: string[] = []
+  const now = new Date().toISOString()
+
+  for (const row of rows) {
+    if (!row.file_path || !fs.existsSync(row.file_path)) continue
+    try {
+      const meta = await extractMp3Metadata(row.file_path, { skipCovers: true })
+      updateTrack.run(
+        meta.artist,
+        meta.artist,
+        meta.title,
+        meta.title,
+        meta.album,
+        meta.year,
+        meta.genre,
+        meta.trackNumber,
+        meta.duration,
+        meta.bitrate,
+        meta.sampleRate,
+        row.id
+      )
+      upsertMeta.run(
+        row.id,
+        meta.rating,
+        now,
+        meta.syncedLyrics,
+        meta.unsyncedLyrics,
+        meta.comment,
+        meta.channels,
+        meta.codec,
+        meta.fileSize
+      )
+      refreshed++
+    } catch (err: any) {
+      errors.push(`${row.filename}: ${err?.message || String(err)}`)
+    }
+  }
+
+  if (refreshed > 0) {
+    invalidateMusicLibraryCache()
+  }
+
+  return { refreshed, errors }
 }
 
 export async function importMusicJsonFile(
@@ -2596,7 +2938,7 @@ export async function previewPresetInMilkdrop(presetIdOrPath: string): Promise<P
 }
 
 function makeUniquePlaylistName(
-  table: 'music_playlists' | 'preset_playlists',
+  table: 'music_playlists' | 'preset_playlists' | 'video_playlists',
   desired: string,
   excludeId?: string
 ): string {
@@ -2612,4 +2954,588 @@ function makeUniquePlaylistName(
     if (!taken.has(candidate.toLowerCase())) return candidate
   }
   return `${base} (${Date.now()})`
+}
+
+// ============================================================================
+// Video Studio (Curationist Video Libraries & Playlists)
+// ============================================================================
+
+const VIDEO_EXTENSIONS = ['.mp4', '.mkv', '.webm', '.mov', '.avi', '.m4v']
+
+export function createVideoLibrary(name: string, description = ''): string {
+  const d = getDb()
+  const id = `vlib-${crypto.randomUUID()}`
+  d.prepare(
+    `INSERT INTO video_libraries (id, name, description, created_at) VALUES (?, ?, ?, ?)`
+  ).run(id, name.trim() || 'New Video Library', description.trim(), new Date().toISOString())
+  logEvent('info', 'Video Library', `Created logical video library "${name.trim()}"`)
+  invalidateVideoLibraryCache()
+  return id
+}
+
+export function renameVideoLibrary(id: string, name: string): void {
+  const d = getDb()
+  d.prepare(`UPDATE video_libraries SET name = ? WHERE id = ?`).run(name.trim(), id)
+  invalidateVideoLibraryCache()
+}
+
+export function deleteVideoLibrary(id: string): void {
+  if (id === 'default-video-lib') {
+    throw new Error('Cannot delete the default Video Library.')
+  }
+  const d = getDb()
+  d.prepare(`DELETE FROM video_libraries WHERE id = ?`).run(id)
+  invalidateVideoLibraryCache()
+}
+
+export async function importVideoFilesOrFolders(
+  inputPaths: string[],
+  libraryId = 'default-video-lib',
+  copyToManaged = false,
+  options?: { targetFolderPath?: string; move?: boolean }
+): Promise<ImportBatchResult> {
+  const d = getDb()
+  const settings = getSettings()
+  const targetManagedDir = (
+    options?.targetFolderPath ||
+    settings.videoManagedStoragePath ||
+    path.join(os.homedir(), 'Videos', 'obs-managed')
+  ).trim()
+  const shouldMove = Boolean(options?.move)
+  const files = collectFilesRecursively(inputPaths, VIDEO_EXTENSIONS)
+
+  const res: ImportBatchResult = {
+    imported: 0,
+    duplicates: 0,
+    repaired: 0,
+    warnings: 0,
+    errors: []
+  }
+
+  if (files.length === 0) return res
+
+  if (copyToManaged) {
+    fs.mkdirSync(targetManagedDir, { recursive: true })
+  }
+
+  const existingRows = d
+    .prepare(`SELECT file_path, original_path FROM video_clips WHERE library_id = ?`)
+    .all(libraryId) as Array<{ file_path: string; original_path: string }>
+  const existingPaths = new Set<string>()
+  for (const r of existingRows) {
+    existingPaths.add(r.file_path.replace(/\\/g, '/').toLowerCase())
+    existingPaths.add(r.original_path.replace(/\\/g, '/').toLowerCase())
+  }
+
+  const insertClip = d.prepare(`
+    INSERT INTO video_clips (
+      id, library_id, file_path, original_path, is_managed,
+      filename, title, artist, duration, file_size, rating, added_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+  `)
+
+  const now = new Date().toISOString()
+
+  for (const rawFile of files) {
+    try {
+      const normOrig = rawFile.replace(/\\/g, '/')
+      if (existingPaths.has(normOrig.toLowerCase())) {
+        res.duplicates++
+        continue
+      }
+
+      let finalPath = normOrig
+      let isManaged = 0
+      if (copyToManaged) {
+        const base = path.basename(rawFile)
+        let dest = path.join(targetManagedDir, base)
+        if (fs.existsSync(dest) && path.resolve(dest).toLowerCase() !== path.resolve(rawFile).toLowerCase()) {
+          const ext = path.extname(base)
+          const stem = path.basename(base, ext)
+          dest = path.join(targetManagedDir, `${stem}_${Date.now().toString(36)}${ext}`)
+        }
+        if (path.resolve(dest).toLowerCase() !== path.resolve(rawFile).toLowerCase()) {
+          fs.copyFileSync(rawFile, dest)
+          if (shouldMove) {
+            try {
+              fs.unlinkSync(rawFile)
+              invalidateFileExistsCache(rawFile)
+            } catch {
+              // ignore
+            }
+          }
+        }
+        finalPath = dest.replace(/\\/g, '/')
+        invalidateFileExistsCache(finalPath)
+        isManaged = 1
+      }
+
+      const stat = fs.statSync(finalPath)
+      const filename = path.basename(finalPath)
+      const baseTitle = path.basename(finalPath, path.extname(finalPath))
+      let artist = ''
+      let title = baseTitle
+      const dashIdx = baseTitle.indexOf(' - ')
+      if (dashIdx > 0) {
+        artist = baseTitle.slice(0, dashIdx).trim()
+        title = baseTitle.slice(dashIdx + 3).trim()
+      }
+
+      const clipId = `vclip-${crypto.randomUUID()}`
+      insertClip.run(
+        clipId,
+        libraryId,
+        finalPath,
+        normOrig,
+        isManaged,
+        filename,
+        title,
+        artist,
+        0,
+        stat.size,
+        now
+      )
+      existingPaths.add(finalPath.toLowerCase())
+      existingPaths.add(normOrig.toLowerCase())
+      res.imported++
+    } catch (err: any) {
+      res.errors.push(`${path.basename(rawFile)}: ${err?.message || String(err)}`)
+    }
+  }
+
+  invalidateVideoLibraryCache()
+  logEvent(
+    'info',
+    'Video Import',
+    `Imported ${res.imported} video clip(s) (${res.duplicates} duplicate(s) skipped)`
+  )
+  return res
+}
+
+export function copyClipsToManagedStorage(
+  clipIds: string[],
+  options?: { targetFolderPath?: string; move?: boolean }
+): { copied: number } {
+  const d = getDb()
+  const settings = getSettings()
+  const managedDir = (
+    options?.targetFolderPath ||
+    settings.videoManagedStoragePath ||
+    path.join(os.homedir(), 'Videos', 'obs-managed')
+  ).trim()
+  const shouldMove = Boolean(options?.move)
+  fs.mkdirSync(managedDir, { recursive: true })
+
+  let copied = 0
+  const selectClip = d.prepare(`SELECT * FROM video_clips WHERE id = ?`)
+  const updateClip = d.prepare(
+    `UPDATE video_clips SET file_path = ?, is_managed = 1, filename = ? WHERE id = ?`
+  )
+  const updatePlItem = d.prepare(
+    `UPDATE video_playlist_items SET value = ? WHERE clip_id = ? OR LOWER(value) = LOWER(?)`
+  )
+
+  withTransaction(() => {
+    for (const id of clipIds) {
+      const row = selectClip.get(id) as any
+      if (!row || !fs.existsSync(row.file_path)) continue
+      const oldPath = String(row.file_path)
+      const base = path.basename(oldPath)
+      let dest = path.join(managedDir, base)
+      if (path.resolve(oldPath).toLowerCase() === path.resolve(dest).toLowerCase()) {
+        updateClip.run(dest.replace(/\\/g, '/'), base, id)
+        continue
+      }
+      if (fs.existsSync(dest)) {
+        const ext = path.extname(base)
+        const stem = path.basename(base, ext)
+        dest = path.join(managedDir, `${stem}_${Date.now().toString(36)}${ext}`)
+      }
+      fs.copyFileSync(oldPath, dest)
+      if (shouldMove) {
+        try {
+          fs.unlinkSync(oldPath)
+          invalidateFileExistsCache(oldPath)
+        } catch {
+          // ignore
+        }
+      }
+      const normDest = dest.replace(/\\/g, '/')
+      invalidateFileExistsCache(normDest)
+      updateClip.run(normDest, path.basename(normDest), id)
+      updatePlItem.run(normDest, id, oldPath)
+      copied++
+    }
+  })
+
+  invalidateVideoLibraryCache()
+  setDomainModified('video', true)
+  return { copied }
+}
+
+export function removeClipsFromVideoLibrary(clipIds: string[]): void {
+  if (clipIds.length === 0) return
+  const d = getDb()
+  const del = d.prepare(`DELETE FROM video_clips WHERE id = ?`)
+  withTransaction(() => {
+    for (const id of clipIds) del.run(id)
+  })
+  invalidateVideoLibraryCache()
+}
+
+export function deleteClipsFromDisk(clipIds: string[]): { deletedFiles: number; removedClips: number } {
+  if (clipIds.length === 0) return { deletedFiles: 0, removedClips: 0 }
+  const d = getDb()
+  const sel = d.prepare(`SELECT id, file_path, original_path FROM video_clips WHERE id = ?`)
+  const delClip = d.prepare(`DELETE FROM video_clips WHERE id = ?`)
+  const delPlItem = d.prepare(`DELETE FROM video_playlist_items WHERE clip_id = ? OR LOWER(value) = LOWER(?)`)
+
+  let deletedFiles = 0
+  let removedClips = 0
+
+  withTransaction(() => {
+    for (const id of clipIds) {
+      const row = sel.get(id) as { id: string; file_path: string; original_path: string } | undefined
+      if (!row) continue
+      for (const p of new Set([row.file_path, row.original_path])) {
+        if (p && fs.existsSync(p)) {
+          try {
+            fs.unlinkSync(p)
+            invalidateFileExistsCache(p)
+            deletedFiles++
+          } catch {
+            // ignore
+          }
+        }
+      }
+      delPlItem.run(id, row.file_path)
+      delClip.run(id)
+      removedClips++
+    }
+  })
+
+  invalidateVideoLibraryCache()
+  setDomainModified('video', true)
+  return { deletedFiles, removedClips }
+}
+
+export function setVideoClipsRating(clipIds: string[], rating: number): void {
+  if (clipIds.length === 0) return
+  const clamped = Math.max(0, Math.min(5, Math.round(rating)))
+  const d = getDb()
+  const updClip = d.prepare(`UPDATE video_clips SET rating = ? WHERE id = ?`)
+  const updPl = d.prepare(`UPDATE video_playlist_items SET rating = ? WHERE clip_id = ? OR id = ?`)
+  withTransaction(() => {
+    for (const id of clipIds) {
+      updClip.run(clamped, id)
+      updPl.run(clamped, id, id)
+    }
+  })
+  invalidateVideoLibraryCache()
+}
+
+export function updateVideoClipMetadata(payload: {
+  clipId: string
+  title?: string
+  artist?: string
+  duration?: number
+}): void {
+  const d = getDb()
+  const row = d.prepare(`SELECT * FROM video_clips WHERE id = ?`).get(payload.clipId) as any
+  if (!row) return
+  const nextTitle = payload.title !== undefined ? payload.title.trim() : row.title
+  const nextArtist = payload.artist !== undefined ? payload.artist.trim() : row.artist
+  const nextDuration = payload.duration !== undefined ? Number(payload.duration) : row.duration
+  d.prepare(`UPDATE video_clips SET title = ?, artist = ?, duration = ? WHERE id = ?`).run(
+    nextTitle,
+    nextArtist,
+    nextDuration,
+    payload.clipId
+  )
+  d.prepare(
+    `UPDATE video_playlist_items SET title = ?, artist = ?, duration = ? WHERE clip_id = ?`
+  ).run(nextTitle, nextArtist, nextDuration, payload.clipId)
+  invalidateVideoLibraryCache()
+}
+
+export function createVideoPlaylist(name: string, makeActive = false): string {
+  const d = getDb()
+  const uniqueName = makeUniquePlaylistName('video_playlists', name)
+  const id = `vpl-${crypto.randomUUID()}`
+  const now = new Date().toISOString()
+  withTransaction(() => {
+    if (makeActive) {
+      d.prepare(`UPDATE video_playlists SET is_active = 0`).run()
+    }
+    d.prepare(
+      `INSERT INTO video_playlists (id, name, source_origin, is_active, updated_at) VALUES (?, ?, 'curationist', ?, ?)`
+    ).run(id, uniqueName, makeActive ? 1 : 0, now)
+  })
+  setDomainModified('video', true)
+  return id
+}
+
+export function renameVideoPlaylist(playlistId: string, newName: string): void {
+  const d = getDb()
+  const unique = makeUniquePlaylistName('video_playlists', newName, playlistId)
+  d.prepare(`UPDATE video_playlists SET name = ?, updated_at = ? WHERE id = ?`).run(
+    unique,
+    new Date().toISOString(),
+    playlistId
+  )
+  setDomainModified('video', true)
+}
+
+export function duplicateVideoPlaylist(playlistId: string): string {
+  const d = getDb()
+  const src = d.prepare(`SELECT * FROM video_playlists WHERE id = ?`).get(playlistId) as any
+  if (!src) throw new Error('Video playlist not found')
+  const newName = makeUniquePlaylistName('video_playlists', `${src.name} (Copy)`)
+  const newId = `vpl-${crypto.randomUUID()}`
+  const now = new Date().toISOString()
+  const items = d
+    .prepare(`SELECT * FROM video_playlist_items WHERE playlist_id = ? ORDER BY position ASC`)
+    .all(playlistId) as Array<any>
+
+  const insItem = d.prepare(`
+    INSERT INTO video_playlist_items (id, playlist_id, clip_id, position, value, title, artist, duration, rating)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `)
+
+  withTransaction(() => {
+    d.prepare(
+      `INSERT INTO video_playlists (id, name, source_origin, is_active, updated_at) VALUES (?, ?, 'curationist', 0, ?)`
+    ).run(newId, newName, now)
+    items.forEach((it, idx) => {
+      insItem.run(
+        `vpli-${crypto.randomUUID()}`,
+        newId,
+        it.clip_id,
+        idx,
+        it.value,
+        it.title,
+        it.artist,
+        it.duration,
+        it.rating
+      )
+    })
+  })
+  setDomainModified('video', true)
+  return newId
+}
+
+export function deleteVideoPlaylist(playlistId: string): void {
+  const d = getDb()
+  d.prepare(`DELETE FROM video_playlists WHERE id = ?`).run(playlistId)
+  setDomainModified('video', true)
+}
+
+export function setActiveVideoPlaylist(playlistId: string): void {
+  const d = getDb()
+  withTransaction(() => {
+    d.prepare(`UPDATE video_playlists SET is_active = 0`).run()
+    d.prepare(`UPDATE video_playlists SET is_active = 1, updated_at = ? WHERE id = ?`).run(
+      new Date().toISOString(),
+      playlistId
+    )
+  })
+  setDomainModified('video', true)
+}
+
+export function addClipsToVideoPlaylist(
+  playlistId: string,
+  clipIds: string[],
+  insertAtPosition?: number
+): void {
+  if (clipIds.length === 0) return
+  const d = getDb()
+  const existing = d
+    .prepare(`SELECT * FROM video_playlist_items WHERE playlist_id = ? ORDER BY position ASC`)
+    .all(playlistId) as Array<any>
+  const selectClip = d.prepare(`SELECT * FROM video_clips WHERE id = ?`)
+
+  const newEntries: Array<any> = []
+  for (const cid of clipIds) {
+    const clip = selectClip.get(cid) as any
+    if (!clip) continue
+    newEntries.push({
+      id: `vpli-${crypto.randomUUID()}`,
+      playlist_id: playlistId,
+      clip_id: clip.id,
+      value: clip.file_path,
+      title: clip.title || clip.filename,
+      artist: clip.artist || '',
+      duration: Number(clip.duration || 0),
+      rating: Number(clip.rating || 0)
+    })
+  }
+
+  if (newEntries.length === 0) return
+
+  const combined = [...existing]
+  if (
+    insertAtPosition !== undefined &&
+    insertAtPosition >= 0 &&
+    insertAtPosition <= combined.length
+  ) {
+    combined.splice(insertAtPosition, 0, ...newEntries)
+  } else {
+    combined.push(...newEntries)
+  }
+
+  const delAll = d.prepare(`DELETE FROM video_playlist_items WHERE playlist_id = ?`)
+  const ins = d.prepare(`
+    INSERT INTO video_playlist_items (id, playlist_id, clip_id, position, value, title, artist, duration, rating)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `)
+
+  withTransaction(() => {
+    delAll.run(playlistId)
+    combined.forEach((it, idx) => {
+      ins.run(
+        it.id,
+        playlistId,
+        it.clip_id,
+        idx,
+        it.value,
+        it.title,
+        it.artist,
+        it.duration || 0,
+        it.rating || 0
+      )
+    })
+    d.prepare(`UPDATE video_playlists SET updated_at = ? WHERE id = ?`).run(
+      new Date().toISOString(),
+      playlistId
+    )
+  })
+  setDomainModified('video', true)
+}
+
+export function removeItemsFromVideoPlaylist(playlistId: string, itemIds: string[]): void {
+  if (itemIds.length === 0) return
+  const d = getDb()
+  const idSet = new Set(itemIds)
+  const existing = d
+    .prepare(`SELECT * FROM video_playlist_items WHERE playlist_id = ? ORDER BY position ASC`)
+    .all(playlistId) as Array<any>
+  const remaining = existing.filter((it) => !idSet.has(it.id))
+
+  const delAll = d.prepare(`DELETE FROM video_playlist_items WHERE playlist_id = ?`)
+  const ins = d.prepare(`
+    INSERT INTO video_playlist_items (id, playlist_id, clip_id, position, value, title, artist, duration, rating)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `)
+
+  withTransaction(() => {
+    delAll.run(playlistId)
+    remaining.forEach((it, idx) => {
+      ins.run(
+        it.id,
+        playlistId,
+        it.clip_id,
+        idx,
+        it.value,
+        it.title,
+        it.artist,
+        it.duration || 0,
+        it.rating || 0
+      )
+    })
+    d.prepare(`UPDATE video_playlists SET updated_at = ? WHERE id = ?`).run(
+      new Date().toISOString(),
+      playlistId
+    )
+  })
+  setDomainModified('video', true)
+}
+
+export function deleteVideoPlaylistItemsFromDisk(
+  playlistId: string,
+  itemIds: string[]
+): { deletedFiles: number; removedItems: number } {
+  if (itemIds.length === 0) return { deletedFiles: 0, removedItems: 0 }
+  const d = getDb()
+  const idSet = new Set(itemIds)
+  const existing = d
+    .prepare(`SELECT * FROM video_playlist_items WHERE playlist_id = ? ORDER BY position ASC`)
+    .all(playlistId) as Array<any>
+  const toDelete = existing.filter((it) => idSet.has(it.id))
+  const clipIds: string[] = []
+  let deletedFiles = 0
+
+  for (const it of toDelete) {
+    if (it.clip_id) clipIds.push(it.clip_id)
+    if (it.value && fs.existsSync(it.value)) {
+      try {
+        fs.unlinkSync(it.value)
+        invalidateFileExistsCache(it.value)
+        deletedFiles++
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  if (clipIds.length > 0) {
+    const res = deleteClipsFromDisk(clipIds)
+    deletedFiles += res.deletedFiles
+  }
+  removeItemsFromVideoPlaylist(playlistId, itemIds)
+  return { deletedFiles, removedItems: toDelete.length }
+}
+
+export function reorderVideoPlaylistItems(playlistId: string, orderedItemIds: string[]): void {
+  const d = getDb()
+  const existing = d
+    .prepare(`SELECT * FROM video_playlist_items WHERE playlist_id = ? ORDER BY position ASC`)
+    .all(playlistId) as Array<any>
+  const byId = new Map(existing.map((it) => [it.id, it]))
+  const reordered: Array<any> = []
+  for (const id of orderedItemIds) {
+    const it = byId.get(id)
+    if (it) {
+      reordered.push(it)
+      byId.delete(id)
+    }
+  }
+  for (const leftover of byId.values()) {
+    reordered.push(leftover)
+  }
+
+  const upd = d.prepare(`UPDATE video_playlist_items SET position = ? WHERE id = ?`)
+  withTransaction(() => {
+    reordered.forEach((it, idx) => upd.run(idx, it.id))
+    d.prepare(`UPDATE video_playlists SET updated_at = ? WHERE id = ?`).run(
+      new Date().toISOString(),
+      playlistId
+    )
+  })
+  setDomainModified('video', true)
+}
+
+export function publishVideoPlaylists(): { playlistName: string; itemCount: number } {
+  const d = getDb()
+  let active = d
+    .prepare(`SELECT * FROM video_playlists WHERE is_active = 1 LIMIT 1`)
+    .get() as any
+  if (!active) {
+    active = d
+      .prepare(`SELECT * FROM video_playlists ORDER BY updated_at DESC LIMIT 1`)
+      .get() as any
+    if (active) {
+      d.prepare(`UPDATE video_playlists SET is_active = 0`).run()
+      d.prepare(`UPDATE video_playlists SET is_active = 1 WHERE id = ?`).run(active.id)
+    }
+  }
+  const countRow = active
+    ? (d
+        .prepare(`SELECT COUNT(*) as c FROM video_playlist_items WHERE playlist_id = ?`)
+        .get(active.id) as { c: number })
+    : { c: 0 }
+  setDomainModified('video', false)
+  return {
+    playlistName: active?.name || '(None)',
+    itemCount: countRow?.c || 0
+  }
 }

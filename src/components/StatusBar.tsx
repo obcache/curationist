@@ -1,10 +1,16 @@
 import React from 'react'
 import { AlertCircle, AlertTriangle, CheckCircle2, Database, Terminal, UploadCloud } from 'lucide-react'
-import type { MusicWorkspaceState, PresetWorkspaceState, WorkspaceMode } from '../types'
+import type {
+  MusicWorkspaceState,
+  PresetWorkspaceState,
+  VideoWorkspaceState,
+  WorkspaceMode
+} from '../types'
 
 interface StatusBarProps {
   workspace: WorkspaceMode
   musicState: MusicWorkspaceState | null
+  videoState?: VideoWorkspaceState | null
   presetState: PresetWorkspaceState | null
   statusMessage: string
   showOutputLog: boolean
@@ -13,12 +19,14 @@ interface StatusBarProps {
   logWarnCount: number
   logErrorCount: number
   onPublishMusic: () => void
+  onPublishVideos?: () => void
   onPublishPresets: () => void
 }
 
 export const StatusBar: React.FC<StatusBarProps> = ({
   workspace,
   musicState,
+  videoState,
   presetState,
   statusMessage,
   showOutputLog,
@@ -27,10 +35,15 @@ export const StatusBar: React.FC<StatusBarProps> = ({
   logWarnCount,
   logErrorCount,
   onPublishMusic,
+  onPublishVideos,
   onPublishPresets
 }) => {
   const isModified =
-    workspace === 'music' ? Boolean(musicState?.isModified) : Boolean(presetState?.isModified)
+    workspace === 'music'
+      ? Boolean(musicState?.isModified)
+      : workspace === 'video'
+        ? Boolean(videoState?.isModified)
+        : Boolean(presetState?.isModified)
 
   return (
     <footer className={`statusbar ${isModified ? 'has-draft' : ''}`}>
@@ -44,8 +57,16 @@ export const StatusBar: React.FC<StatusBarProps> = ({
           <span className="statusbar-item">
             <span>
               MP3s: <strong>{musicState.tracks.length}</strong> ({musicState.libraries.length} libs) |
-              Music Playlists: <strong>{musicState.playlists.length}</strong> (Active JSON:{' '}
-              <strong>{musicState.activeJsonPlaylistIds.length}</strong>)
+              Music Playlists: <strong>{musicState.playlists.length}</strong>
+            </span>
+          </span>
+        )}
+
+        {videoState && (
+          <span className="statusbar-item">
+            <span>
+              Videos: <strong>{videoState.clips.length}</strong> ({videoState.libraries.length} libs) |
+              Video Playlists: <strong>{videoState.playlists.length}</strong>
             </span>
           </span>
         )}
@@ -108,6 +129,31 @@ export const StatusBar: React.FC<StatusBarProps> = ({
               <>
                 <CheckCircle2 size={12} color="#4ec9b0" />
                 <span>saved-playlists.json: Synced</span>
+              </>
+            )}
+          </span>
+        )}
+
+        {workspace === 'video' && videoState && (
+          <span className="statusbar-item">
+            {videoState.isModified ? (
+              <>
+                <AlertCircle size={12} />
+                <span>Curationist Video: MODIFIED (Draft)</span>
+                {onPublishVideos && (
+                  <button
+                    className="vscode-btn publish"
+                    style={{ padding: '1px 7px', fontSize: 10.5 }}
+                    onClick={onPublishVideos}
+                  >
+                    <UploadCloud size={11} /> Publish Videos
+                  </button>
+                )}
+              </>
+            ) : (
+              <>
+                <CheckCircle2 size={12} color="#4ec9b0" />
+                <span>Curationist Video: Synced</span>
               </>
             )}
           </span>

@@ -1,5 +1,5 @@
 import React from 'react'
-import { Disc3, Settings, Sparkles } from 'lucide-react'
+import { Disc3, Film, Settings, Sparkles } from 'lucide-react'
 import type { WorkspaceMode } from '../types'
 
 interface ActivityBarProps {
@@ -7,6 +7,7 @@ interface ActivityBarProps {
   onSelectWorkspace: (mode: WorkspaceMode) => void
   onOpenPreferences: () => void
   musicModified: boolean
+  videoModified?: boolean
   presetModified: boolean
 }
 
@@ -15,6 +16,7 @@ export const ActivityBar: React.FC<ActivityBarProps> = ({
   onSelectWorkspace,
   onOpenPreferences,
   musicModified,
+  videoModified = false,
   presetModified
 }) => {
   return (
@@ -23,16 +25,25 @@ export const ActivityBar: React.FC<ActivityBarProps> = ({
         <button
           className={`activity-btn ${workspace === 'music' ? 'active' : ''}`}
           onClick={() => onSelectWorkspace('music')}
-          title="nowPlaylisting — MP3 Libraries & Saved Playlists (Ctrl+1)"
+          title="Curationist Audio — MP3 Libraries & Saved Playlists (Ctrl+1)"
         >
           <Disc3 size={22} />
           {musicModified && <span className="activity-badge" title="Draft changes pending publish" />}
         </button>
 
         <button
+          className={`activity-btn ${workspace === 'video' ? 'active' : ''}`}
+          onClick={() => onSelectWorkspace('video')}
+          title="Curationist Video — Video Clip Libraries & Playlists (Ctrl+2)"
+        >
+          <Film size={21} />
+          {videoModified && <span className="activity-badge" title="Draft changes pending publish" />}
+        </button>
+
+        <button
           className={`activity-btn ${workspace === 'presets' ? 'active' : ''}`}
           onClick={() => onSelectWorkspace('presets')}
-          title="obSpiltMilk — projectM Preset Libraries & Playlist (Ctrl+2)"
+          title="Curationist Visualizer — projectM Preset Libraries & Playlist (Ctrl+3)"
         >
           <Sparkles size={22} />
           {presetModified && <span className="activity-badge" title="Draft changes pending publish" />}

@@ -30,13 +30,16 @@ import { ContextMenu, type ContextMenuEntry } from './ContextMenu'
 import { DockableSection } from './DockableSection'
 import { extractNormalizedDir, FolderTreeFilter } from './FolderTreeFilter'
 import { ManagedStorageSelector } from './ManagedStorageSelector'
+import { ObsLedToggle } from './ObsSourceSettingsModal'
 import { ProjectMPreviewPanel } from './ProjectMPreviewPanel'
 import { StarRatingCell } from './StarRatingCell'
+import { useColumnOrder } from '../hooks/useColumnOrder'
 import { useResizableColumns } from '../hooks/useResizableColumns'
 import { useVirtualTable } from '../hooks/useVirtualTable'
 import type { PanelViewItem } from './TitleBar'
 import type {
   AppSettings,
+  ObsConnectionState,
   PresetInspectionResult,
   PresetItem,
   PresetPlaylist,
@@ -66,6 +69,16 @@ interface PresetWorkspaceProps {
     togglePanel: (id: string) => void
     showAllPanels: () => void
   } | null>
+  milkLabActionRef?: React.MutableRefObject<{
+    openNew: () => void
+    openEditSelected: () => void
+    getSelectedPresetId: () => string | null
+  } | null>
+  obsVideoMode: boolean
+  onToggleObsVideoMode: () => void
+  obsConnection: ObsConnectionState
+  selectedObsVideoSourceId: string
+  onSelectObsVideoSourceId: (id: string) => void
 }
 
 const PRESET_SECTIONS_STORAGE_KEY = 'curationist:preset-sections:v3'
@@ -110,7 +123,13 @@ export const PresetWorkspace: React.FC<PresetWorkspaceProps> = ({
   onNotify,
   layoutResetCounter,
   onPanelsChange,
-  panelActionRef
+  panelActionRef,
+  milkLabActionRef,
+  obsVideoMode,
+  onToggleObsVideoMode,
+  obsConnection,
+  selectedObsVideoSourceId,
+  onSelectObsVideoSourceId
 }) => {
   const [sections, setSections] = useState<SectionLayoutState[]>(loadInitialPresetSections)
 
@@ -128,6 +147,7 @@ export const PresetWorkspace: React.FC<PresetWorkspaceProps> = ({
 
   const [activePreviewPresetPath, setActivePreviewPresetPath] = useState<string | null>(null)
   const [activePreviewPresetLabel, setActivePreviewPresetLabel] = useState<string | null>(null)
+  const [previewNonce, setPreviewNonce] = useState<number>(0)
   const [isPlaylistPlaying, setIsPlaylistPlaying] = useState<boolean>(false)
   const [playingPlaylistId, setPlayingPlaylistId] = useState<string | null>(null)
 
@@ -253,6 +273,8 @@ export const PresetWorkspace: React.FC<PresetWorkspaceProps> = ({
 
   type PresetLibSortCol = 'label' | 'rating' | 'storage' | 'libraryName' | 'originalPath'
   type PresetPlSortCol = 'position' | 'label' | 'rating' | 'path'
+  type PresetLibColKey = 'play' | PresetLibSortCol
+  type PresetPlColKey = 'play' | 'pos' | 'label' | 'rating' | 'path' | 'dir'
 
   const [libSort, setLibSort] = useState<{ col: PresetLibSortCol | null; dir: 'asc' | 'desc' }>({
     col: null,
@@ -275,6 +297,18 @@ export const PresetWorkspace: React.FC<PresetWorkspaceProps> = ({
     }
   )
 
+  const {
+    order: libColOrder,
+    getHeaderDragProps: getLibHeaderDragProps
+  } = useColumnOrder<PresetLibColKey>('curationist:preset-lib-col-order:v1', [
+    'play',
+    'label',
+    'rating',
+    'storage',
+    'libraryName',
+    'originalPath'
+  ])
+
   const { widths: plColWidths, startResize: startPlColResize } = useResizableColumns(
     'curationist:preset-pl-cols:v1',
     {
@@ -286,6 +320,18 @@ export const PresetWorkspace: React.FC<PresetWorkspaceProps> = ({
       dir: 42
     }
   )
+
+  const {
+    order: plColOrder,
+    getHeaderDragProps: getPlHeaderDragProps
+  } = useColumnOrder<PresetPlColKey>('curationist:preset-pl-col-order:v1', [
+    'play',
+    'pos',
+    'label',
+    'rating',
+    'path',
+    'dir'
+  ])
 
   const cycleLibSort = (col: PresetLibSortCol) => {
     setLibSort((prev) => {
@@ -840,28 +886,159 @@ export const PresetWorkspace: React.FC<PresetWorkspaceProps> = ({
     }
   }
 
+  const handleOpenMilkLabNew = useCallback(async () => {
+    try {
+      const res = await window.curationist.openMilkLab({
+        mode: 'new',
+        libraryId: selectedLibraryId === 'all' ? 'default-preset-lib' : selectedLibraryId
+      })
+      onNotify(res.message)
+    } catch (err: any) {
+      onNotify(`milkLab error: ${err?.message || String(err)}`)
+    }
+  }, [selectedLibraryId, onNotify])
+
+  const handleOpenMilkLabEdit = useCallback(
+    async (explicitPresetId?: string) => {
+      const targetId = explicitPresetId || primaryInspectedPresetId
+      if (!targetId) {
+        onNotify('Select a preset first to edit it in milkLab')
+        return
+      }
+      try {
+        const res = await window.curationist.openMilkLab({
+          mode: 'edit',
+          presetId: targetId,
+          libraryId: selectedLibraryId === 'all' ? undefined : selectedLibraryId
+        })
+        onNotify(res.message)
+      } catch (err: any) {
+        onNotify(`milkLab error: ${err?.message || String(err)}`)
+      }
+    },
+    [primaryInspectedPresetId, selectedLibraryId, onNotify]
+  )
+
+  useEffect(() => {
+    if (milkLabActionRef) {
+      milkLabActionRef.current = {
+        openNew: () => {
+          void handleOpenMilkLabNew()
+        },
+        openEditSelected: () => {
+          void handleOpenMilkLabEdit()
+        },
+        getSelectedPresetId: () => primaryInspectedPresetId
+      }
+    }
+  }, [milkLabActionRef, handleOpenMilkLabNew, handleOpenMilkLabEdit, primaryInspectedPresetId])
+
+  const resolvePresetTarget = useCallback(
+    (presetIdOrPath: string): { id: string; path: string; label: string } => {
+      const lower = presetIdOrPath.toLowerCase()
+      const foundPreset =
+        presetByIdMap.get(presetIdOrPath) ||
+        state.presets.find(
+          (p) =>
+            p.id.toLowerCase() === lower ||
+            p.managedPath.toLowerCase() === lower ||
+            p.originalPath.toLowerCase() === lower
+        )
+      if (foundPreset) {
+        return {
+          id: foundPreset.id,
+          path: foundPreset.managedPath || foundPreset.originalPath,
+          label: foundPreset.label
+        }
+      }
+      for (const pl of state.playlists) {
+        for (const it of pl.items || []) {
+          if (
+            it.id === presetIdOrPath ||
+            it.presetId === presetIdOrPath ||
+            it.managedPath.toLowerCase() === lower ||
+            it.originalPath.toLowerCase() === lower
+          ) {
+            const p = it.presetId ? presetByIdMap.get(it.presetId) : undefined
+            const path = p
+              ? p.managedPath || p.originalPath
+              : it.managedPath || it.originalPath
+            return {
+              id: it.presetId || it.id,
+              path,
+              label:
+                p?.label ||
+                it.label ||
+                path.split(/[/\\]/).pop()?.replace(/\.milk$/i, '') ||
+                path
+            }
+          }
+        }
+      }
+      return {
+        id: presetIdOrPath,
+        path: presetIdOrPath,
+        label: presetIdOrPath.split(/[/\\]/).pop()?.replace(/\.milk$/i, '') || presetIdOrPath
+      }
+    },
+    [presetByIdMap, state.presets, state.playlists]
+  )
+
+  const handleQueuePresetsToObs = useCallback(
+    (presetIdsOrPaths: string[], mode: 'play_now' | 'play_next' | 'append') => {
+      if (presetIdsOrPaths.length === 0) return
+      const videoSources = obsConnection.sources.filter((s) => s.kind === 'video')
+      const targetObsSourceId =
+        selectedObsVideoSourceId &&
+        (videoSources.length === 0 ||
+          videoSources.some((s) => s.sourceId === selectedObsVideoSourceId))
+          ? selectedObsVideoSourceId
+          : videoSources[0]?.sourceId
+      const firstResolved = resolvePresetTarget(presetIdsOrPaths[0])
+
+      void window.curationist
+        .publishObsVideoQueue({
+          sourceId: targetObsSourceId,
+          presetIds: presetIdsOrPaths,
+          mode
+        })
+        .then(() => {
+          if (mode === 'play_now') {
+            onNotify(
+              obsConnection.connected
+                ? `Playing "${firstResolved.label}" now in OBS Curationist Visualizer`
+                : `Staged "${firstResolved.label}" to play now in OBS Curationist Visualizer`
+            )
+          } else if (mode === 'play_next') {
+            onNotify(
+              `Staged ${presetIdsOrPaths.length} preset(s) to play next in OBS Curationist Visualizer (current preset uninterrupted)`
+            )
+          } else {
+            onNotify(
+              `Appended ${presetIdsOrPaths.length} preset(s) to OBS Curationist Visualizer live queue`
+            )
+          }
+        })
+        .catch((err: any) => {
+          onNotify(`OBS Visualizer queue error: ${err?.message || String(err)}`)
+        })
+    },
+    [obsConnection, selectedObsVideoSourceId, resolvePresetTarget, onNotify]
+  )
+
   const handlePreviewPreset = useCallback(
     (presetIdOrPath: string, e?: React.MouseEvent, keepPlayingSet = false) => {
       if (e) e.stopPropagation()
       if (!keepPlayingSet) {
         setIsPlaylistPlaying(false)
       }
-      const foundPreset =
-        presetByIdMap.get(presetIdOrPath) ||
-        state.presets.find(
-          (p) =>
-            p.managedPath.toLowerCase() === presetIdOrPath.toLowerCase() ||
-            p.originalPath.toLowerCase() === presetIdOrPath.toLowerCase()
-        )
-      const presetPath = foundPreset
-        ? foundPreset.managedPath || foundPreset.originalPath
-        : presetIdOrPath
-      const presetLabel = foundPreset
-        ? foundPreset.label
-        : presetPath.split(/[/\\]/).pop()?.replace(/\.milk$/i, '') || presetPath
+      const resolved = resolvePresetTarget(presetIdOrPath)
+      const presetPath = resolved.path
+      const presetLabel = resolved.label
 
       setActivePreviewPresetPath(presetPath)
       setActivePreviewPresetLabel(presetLabel)
+      setPreviewNonce((n) => n + 1)
 
       // Ensure the projectm-preview section is visible and uncollapsed
       setSections((prev) => {
@@ -872,9 +1049,15 @@ export const PresetWorkspace: React.FC<PresetWorkspaceProps> = ({
         return next
       })
 
+      // When OB Remote LED is active, ship the preset to Curationist Visualizer in OBS
+      if (obsVideoMode && presetPath) {
+        handleQueuePresetsToObs([resolved.id || presetPath], 'play_now')
+        return
+      }
+
       onNotify(`Previewing preset in projectM: ${presetLabel}`)
     },
-    [presetByIdMap, state.presets, onNotify]
+    [resolvePresetTarget, onNotify, obsVideoMode, handleQueuePresetsToObs]
   )
 
   const activePlayingPlaylist = useMemo(() => {
@@ -908,17 +1091,61 @@ export const PresetWorkspace: React.FC<PresetWorkspaceProps> = ({
       }
       setSelectedPlaylistId(pl.id)
       setPlayingPlaylistId(pl.id)
+
       const idx = Math.max(0, Math.min(items.length - 1, startIndex))
-      const item = items[idx]
-      const p = item.presetId ? presetByIdMap.get(item.presetId) : undefined
-      const target = p ? p.managedPath || p.originalPath : item.managedPath || item.originalPath
-      handlePreviewPreset(target, undefined, true)
+      const firstItem = items[idx]
+      const firstResolved = resolvePresetTarget(firstItem.presetId || firstItem.id)
+      setActivePreviewPresetPath(firstResolved.path)
+      setActivePreviewPresetLabel(firstResolved.label)
+      setPreviewNonce((n) => n + 1)
+
+      if (obsVideoMode) {
+        const videoSources = obsConnection.sources.filter((s) => s.kind === 'video')
+        const targetObsSourceId =
+          selectedObsVideoSourceId &&
+          (videoSources.length === 0 ||
+            videoSources.some((s) => s.sourceId === selectedObsVideoSourceId))
+            ? selectedObsVideoSourceId
+            : videoSources[0]?.sourceId
+        const orderedIds = items
+          .slice(startIndex)
+          .concat(items.slice(0, startIndex))
+          .map((it) => it.presetId || it.managedPath || it.originalPath || it.id)
+          .filter(Boolean)
+        void window.curationist
+          .publishObsVideoQueue({
+            sourceId: targetObsSourceId,
+            presetIds: orderedIds,
+            mode: 'play_now'
+          })
+          .then(() => {
+            onNotify(
+              obsConnection.connected
+                ? `Broadcasting preset playlist "${pl.name}" (${items.length} presets) to OBS Curationist Visualizer`
+                : `Published playlist "${pl.name}" to OBS Curationist Visualizer queue`
+            )
+          })
+          .catch((err: any) => {
+            onNotify(`OBS Visualizer playlist error: ${err?.message || String(err)}`)
+          })
+        return
+      }
+
+      handlePreviewPreset(firstResolved.path, undefined, true)
       setIsPlaylistPlaying(true)
       onNotify(
         `Playing preset playlist "${pl.name}" (${items.length} presets, ${presetDurationSec}s per preset)`
       )
     },
-    [presetByIdMap, handlePreviewPreset, onNotify, presetDurationSec]
+    [
+      resolvePresetTarget,
+      handlePreviewPreset,
+      onNotify,
+      presetDurationSec,
+      obsVideoMode,
+      selectedObsVideoSourceId,
+      obsConnection
+    ]
   )
 
   const handleTogglePlaylistPlay = useCallback(() => {
@@ -965,14 +1192,35 @@ export const PresetWorkspace: React.FC<PresetWorkspaceProps> = ({
     handlePreviewPreset(target, undefined, isPlaylistPlaying)
   }, [playlistItems, currentPlaylistIdx, presetByIdMap, handlePreviewPreset, isPlaylistPlaying])
 
-  // Auto-advance timer when playing a preset playlist
+  // Auto-advance timer when playing a preset playlist locally
   useEffect(() => {
-    if (!isPlaylistPlaying || playlistItems.length === 0) return
+    if (!isPlaylistPlaying || obsVideoMode || playlistItems.length === 0) return
     const timer = setInterval(() => {
       handleNextPreset()
     }, presetDurationSec * 1000)
     return () => clearInterval(timer)
-  }, [isPlaylistPlaying, playlistItems.length, presetDurationSec, handleNextPreset])
+  }, [isPlaylistPlaying, obsVideoMode, playlistItems.length, presetDurationSec, handleNextPreset])
+
+  // When OB Video Remote is switched ON while a local preset playlist is playing,
+  // stop the local timer and hand off the entire playlist to OBS Curationist Visualizer
+  useEffect(() => {
+    if (obsVideoMode && isPlaylistPlaying) {
+      setIsPlaylistPlaying(false)
+      const targetPl = activePlayingPlaylist || selectedPlaylist || activeDatPlaylist
+      if (targetPl && (targetPl.items || []).length > 0) {
+        const startIdx = currentPlaylistIdx >= 0 ? currentPlaylistIdx : 0
+        handlePlayPresetPlaylist(targetPl, startIdx)
+      }
+    }
+  }, [
+    obsVideoMode,
+    isPlaylistPlaying,
+    activePlayingPlaylist,
+    selectedPlaylist,
+    activeDatPlaylist,
+    currentPlaylistIdx,
+    handlePlayPresetPlaylist
+  ])
 
   // Context Menu for Preset Library rows
   const handlePresetContextMenu = (e: React.MouseEvent, preset: PresetItem) => {
@@ -997,11 +1245,43 @@ export const PresetWorkspace: React.FC<PresetWorkspaceProps> = ({
       },
       { type: 'separator', id: 'sep-rate' },
       {
-        id: 'preview-projectm',
-        label: 'Preview in projectM',
+        id: 'play-now',
+        label: obsVideoMode
+          ? 'Play Now in OBS (Curationist Visualizer)'
+          : 'Play Now in projectM Preview',
         icon: <Play size={12} />,
         onClick: () => handlePreviewPreset(preset.id)
       },
+      {
+        id: 'play-next-obs',
+        label: `Play Next in OBS Live Queue (${count})`,
+        icon: <ArrowRight size={12} />,
+        onClick: () => handleQueuePresetsToObs(targetIds, 'play_next')
+      },
+      {
+        id: 'append-obs',
+        label: `Add to OBS Live Queue (${count})`,
+        icon: <Plus size={12} />,
+        onClick: () => handleQueuePresetsToObs(targetIds, 'append')
+      },
+      { type: 'separator', id: 'sep-milklab' },
+      {
+        id: 'edit-in-milklab',
+        label: 'Edit Preset in milkLab...',
+        icon: <Code2 size={12} />,
+        onClick: () => {
+          void handleOpenMilkLabEdit(preset.id)
+        }
+      },
+      {
+        id: 'new-in-milklab',
+        label: 'New Preset in milkLab...',
+        icon: <Plus size={12} />,
+        onClick: () => {
+          void handleOpenMilkLabNew()
+        }
+      },
+      { type: 'separator', id: 'sep-pl' },
       {
         id: 'add-to-playlist',
         label: `Add to "${selectedPlaylist?.name || 'Selected Playlist'}" (${count})`,
@@ -1065,9 +1345,13 @@ export const PresetWorkspace: React.FC<PresetWorkspaceProps> = ({
       setLastClickedItemId(item.id)
     }
     const count = targetItemIds.length
-    const presetIds = (selectedPlaylist?.items || [])
-      .filter((it) => targetItemIds.includes(it.id) && it.presetId)
-      .map((it) => it.presetId!)
+    const selectedItems = (selectedPlaylist?.items || []).filter((it) =>
+      targetItemIds.includes(it.id)
+    )
+    const presetIds = selectedItems.filter((it) => it.presetId).map((it) => it.presetId!)
+    const queueTokens = selectedItems.map(
+      (it) => it.presetId || it.managedPath || it.originalPath || it.id
+    )
 
     const entries: ContextMenuEntry[] = [
       {
@@ -1084,9 +1368,23 @@ export const PresetWorkspace: React.FC<PresetWorkspaceProps> = ({
       { type: 'separator', id: 'sep-pl-rate' },
       {
         id: 'preview-pl-projectm',
-        label: 'Preview Preset in projectM',
+        label: obsVideoMode
+          ? 'Play Now in OBS (Curationist Visualizer)'
+          : 'Play Now in projectM Preview',
         icon: <Play size={12} />,
         onClick: () => handlePreviewPreset(item.presetId || item.id)
+      },
+      {
+        id: 'play-next-pl-obs',
+        label: `Play Next in OBS Live Queue (${count})`,
+        icon: <ArrowRight size={12} />,
+        onClick: () => handleQueuePresetsToObs(queueTokens, 'play_next')
+      },
+      {
+        id: 'append-pl-obs',
+        label: `Add to OBS Live Queue (${count})`,
+        icon: <Plus size={12} />,
+        onClick: () => handleQueuePresetsToObs(queueTokens, 'append')
       },
       {
         id: 'play-pl-set',
@@ -1097,6 +1395,24 @@ export const PresetWorkspace: React.FC<PresetWorkspaceProps> = ({
           if (selectedPlaylist) {
             handlePlayPresetPlaylist(selectedPlaylist, item.position)
           }
+        }
+      },
+      { type: 'separator', id: 'sep-pl-milklab' },
+      {
+        id: 'edit-pl-in-milklab',
+        label: 'Edit Preset in milkLab...',
+        icon: <Code2 size={12} />,
+        disabled: !item.presetId,
+        onClick: () => {
+          if (item.presetId) void handleOpenMilkLabEdit(item.presetId)
+        }
+      },
+      {
+        id: 'new-pl-in-milklab',
+        label: 'New Preset in milkLab...',
+        icon: <Plus size={12} />,
+        onClick: () => {
+          void handleOpenMilkLabNew()
         }
       },
       { type: 'separator', id: 'sep-pl-move' },
@@ -1181,6 +1497,7 @@ export const PresetWorkspace: React.FC<PresetWorkspaceProps> = ({
             <ProjectMPreviewPanel
               activePresetPath={activePreviewPresetPath}
               activePresetLabel={activePreviewPresetLabel}
+              previewNonce={previewNonce}
               onPrevPreset={handlePrevPreset}
               onNextPreset={handleNextPreset}
               hasPrevPreset={playlistItems.length > 1}
@@ -1193,6 +1510,11 @@ export const PresetWorkspace: React.FC<PresetWorkspaceProps> = ({
               }}
               isCollapsed={sec.collapsed}
               onNotify={onNotify}
+              obsVideoMode={obsVideoMode}
+              onToggleObsVideoMode={onToggleObsVideoMode}
+              obsConnection={obsConnection}
+              selectedObsVideoSourceId={selectedObsVideoSourceId}
+              onSelectObsVideoSourceId={onSelectObsVideoSourceId}
             />
           </DockableSection>
         )
@@ -1304,7 +1626,10 @@ export const PresetWorkspace: React.FC<PresetWorkspaceProps> = ({
                       e.dataTransfer.effectAllowed = 'copyMove'
                     }}
                     onDragOver={(e) => {
-                      if (e.dataTransfer.types.includes('application/x-curationist-preset-ids')) {
+                      if (
+                        e.dataTransfer.types.includes('application/x-curationist-preset-ids') ||
+                        e.dataTransfer.types.includes('application/x-curationist-preset-playlist-id')
+                      ) {
                         e.preventDefault()
                         e.dataTransfer.dropEffect = 'copy'
                         setDragOverPlaylistId(`all-${pl.id}`)
@@ -1315,6 +1640,21 @@ export const PresetWorkspace: React.FC<PresetWorkspaceProps> = ({
                     }}
                     onDrop={async (e) => {
                       setDragOverPlaylistId(null)
+                      const rawPlId = e.dataTransfer.getData(
+                        'application/x-curationist-preset-playlist-id'
+                      )
+                      if (rawPlId && rawPlId !== pl.id) {
+                        const sourcePl = state.playlists.find((p) => p.id === rawPlId)
+                        if (sourcePl) {
+                          const presetIds = (sourcePl.items || [])
+                            .map((it) => it.presetId)
+                            .filter((id): id is string => Boolean(id))
+                          if (presetIds.length > 0) {
+                            await handleAddPresetsByIdsToPlaylist(presetIds, pl.id)
+                          }
+                        }
+                        return
+                      }
                       const raw = e.dataTransfer.getData('application/x-curationist-preset-ids')
                       if (raw) {
                         try {
@@ -1739,6 +2079,7 @@ export const PresetWorkspace: React.FC<PresetWorkspaceProps> = ({
                       setSelectedPlaylistId(activeDatPlaylist.id)
                       setSelectedPlaylistItemIds([item.id])
                     }}
+                    onDoubleClick={(e) => handlePreviewPreset(item.presetId || item.id, e)}
                   >
                     <div className="list-row-main">
                       <span
@@ -1802,6 +2143,13 @@ export const PresetWorkspace: React.FC<PresetWorkspaceProps> = ({
                     {inspection.label}
                   </strong>
                   <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+                    <button
+                      className="vscode-btn"
+                      onClick={() => void handleOpenMilkLabEdit(inspection.id)}
+                      title="Open this preset in milkLab Preset IDE"
+                    >
+                      <Code2 size={11} /> Edit in milkLab
+                    </button>
                     <button
                       className="vscode-btn primary"
                       onClick={(e) => handlePreviewPreset(inspection.id, e)}
@@ -2210,6 +2558,21 @@ export const PresetWorkspace: React.FC<PresetWorkspaceProps> = ({
                   <div className="editor-toolbar-group">
                     <button
                       className="vscode-btn"
+                      onClick={() => void handleOpenMilkLabNew()}
+                      title="Create a new .milk preset in milkLab Preset IDE"
+                    >
+                      <Code2 size={12} /> New in milkLab
+                    </button>
+                    <button
+                      className="vscode-btn"
+                      disabled={selectedPresetIds.length === 0}
+                      onClick={() => void handleOpenMilkLabEdit(selectedPresetIds[0])}
+                      title="Edit selected .milk preset in milkLab Preset IDE"
+                    >
+                      <Edit3 size={12} /> Edit in milkLab
+                    </button>
+                    <button
+                      className="vscode-btn"
                       disabled={selectedPresetIds.length === 0}
                       onClick={(e) => handlePreviewPreset(selectedPresetIds[0], e)}
                       title="Preview Selected Preset in projectM"
@@ -2285,108 +2648,57 @@ export const PresetWorkspace: React.FC<PresetWorkspaceProps> = ({
                   <table className="data-table">
                     <thead>
                       <tr>
-                        <th style={{ width: libColWidths.play }}></th>
-                        <th
-                          className="sortable-th"
-                          style={{ width: libColWidths.label }}
-                          onClick={() => cycleLibSort('label')}
-                        >
-                          <div className="th-sort-content">
-                            <span>Preset Label</span>
-                            {libSort.col === 'label' && (
-                              <span className="sort-indicator">
-                                {libSort.dir === 'asc' ? '▲' : '▼'}
-                              </span>
-                            )}
-                          </div>
-                          <div
-                            className="col-resize-handle"
-                            onMouseDown={(e) => startLibColResize('label', e)}
-                            onClick={(e) => e.stopPropagation()}
-                          />
-                        </th>
-                        <th
-                          className="sortable-th"
-                          style={{ width: libColWidths.rating }}
-                          onClick={() => cycleLibSort('rating')}
-                        >
-                          <div className="th-sort-content">
-                            <span>Rating</span>
-                            {libSort.col === 'rating' && (
-                              <span className="sort-indicator">
-                                {libSort.dir === 'asc' ? '▲' : '▼'}
-                              </span>
-                            )}
-                          </div>
-                          <div
-                            className="col-resize-handle"
-                            onMouseDown={(e) => startLibColResize('rating', e)}
-                            onClick={(e) => e.stopPropagation()}
-                          />
-                        </th>
-                        <th
-                          className="sortable-th"
-                          style={{ width: libColWidths.storage }}
-                          onClick={() => cycleLibSort('storage')}
-                        >
-                          <div className="th-sort-content">
-                            <span>Storage</span>
-                            {libSort.col === 'storage' && (
-                              <span className="sort-indicator">
-                                {libSort.dir === 'asc' ? '▲' : '▼'}
-                              </span>
-                            )}
-                          </div>
-                          <div
-                            className="col-resize-handle"
-                            onMouseDown={(e) => startLibColResize('storage', e)}
-                            onClick={(e) => e.stopPropagation()}
-                          />
-                        </th>
-                        <th
-                          className="sortable-th"
-                          style={{ width: libColWidths.libraryName }}
-                          onClick={() => cycleLibSort('libraryName')}
-                        >
-                          <div className="th-sort-content">
-                            <span>Library</span>
-                            {libSort.col === 'libraryName' && (
-                              <span className="sort-indicator">
-                                {libSort.dir === 'asc' ? '▲' : '▼'}
-                              </span>
-                            )}
-                          </div>
-                          <div
-                            className="col-resize-handle"
-                            onMouseDown={(e) => startLibColResize('libraryName', e)}
-                            onClick={(e) => e.stopPropagation()}
-                          />
-                        </th>
-                        <th
-                          className="sortable-th"
-                          style={{ width: libColWidths.originalPath }}
-                          onClick={() => cycleLibSort('originalPath')}
-                        >
-                          <div className="th-sort-content">
-                            <span>Original / Managed Path</span>
-                            {libSort.col === 'originalPath' && (
-                              <span className="sort-indicator">
-                                {libSort.dir === 'asc' ? '▲' : '▼'}
-                              </span>
-                            )}
-                          </div>
-                          <div
-                            className="col-resize-handle"
-                            onMouseDown={(e) => startLibColResize('originalPath', e)}
-                            onClick={(e) => e.stopPropagation()}
-                          />
-                        </th>
+                        {libColOrder.map((col) => {
+                          const dragProps = getLibHeaderDragProps(col)
+                          if (col === 'play') {
+                            return (
+                              <th
+                                key={col}
+                                {...dragProps}
+                                className={dragProps.className}
+                                style={{ width: libColWidths.play, cursor: 'grab' }}
+                                title="Drag column header to reorder"
+                              />
+                            )
+                          }
+                          const labelMap: Record<PresetLibSortCol, string> = {
+                            label: 'Preset Label',
+                            rating: 'Rating',
+                            storage: 'Storage',
+                            libraryName: 'Library',
+                            originalPath: 'Original / Managed Path'
+                          }
+                          return (
+                            <th
+                              key={col}
+                              {...dragProps}
+                              className={`sortable-th ${dragProps.className}`.trim()}
+                              style={{ width: libColWidths[col], cursor: 'grab' }}
+                              onClick={() => cycleLibSort(col)}
+                              title="Click to sort • Drag column header to reorder"
+                            >
+                              <div className="th-sort-content">
+                                <span>{labelMap[col]}</span>
+                                {libSort.col === col && (
+                                  <span className="sort-indicator">
+                                    {libSort.dir === 'asc' ? '▲' : '▼'}
+                                  </span>
+                                )}
+                              </div>
+                              <div
+                                className="col-resize-handle"
+                                onMouseDown={(e) => startLibColResize(col, e)}
+                                onClick={(e) => e.stopPropagation()}
+                              />
+                            </th>
+                          )
+                        })}
                       </tr>
                     </thead>
                     <tbody>
                       {libVirtual.topSpacerHeight > 0 && (
                         <tr aria-hidden="true" style={{ height: libVirtual.topSpacerHeight }}>
-                          <td colSpan={6} style={{ padding: 0, border: 'none' }} />
+                          <td colSpan={libColOrder.length} style={{ padding: 0, border: 'none' }} />
                         </tr>
                       )}
                       {filteredPresets
@@ -2408,65 +2720,75 @@ export const PresetWorkspace: React.FC<PresetWorkspaceProps> = ({
                               }}
                               onClick={(e) => handlePresetRowClick(e, preset.id)}
                               onContextMenu={(e) => handlePresetContextMenu(e, preset)}
-                              onDoubleClick={() => {
-                                if (selectedPlaylist) {
-                                  window.curationist
-                                    .addPresetsToPlaylist(selectedPlaylist.id, [preset.id])
-                                    .then((next) => {
-                                      onStateChange(next)
-                                      onNotify(
-                                        `Added "${preset.label}" to "${selectedPlaylist.name}"`
-                                      )
-                                    })
-                                }
-                              }}
+                              onDoubleClick={(e) => handlePreviewPreset(preset.id, e)}
                             >
-                              <td style={{ textAlign: 'center' }}>
-                                <button
-                                  className="icon-btn accent"
-                                  title="Preview Preset in projectM"
-                                  onClick={(e) => handlePreviewPreset(preset.id, e)}
-                                >
-                                  <Play size={11} />
-                                </button>
-                              </td>
-                              <td title={preset.label}>
-                                <strong>{preset.label}</strong>
-                              </td>
-                              <td>
-                                <StarRatingCell
-                                  rating={preset.rating || 0}
-                                  onRate={(r) => {
-                                    void handleSetPresetRating([preset.id], r)
-                                  }}
-                                />
-                              </td>
-                              <td>
-                                {!preset.fileExists ? (
-                                  <span className="badge missing">Missing</span>
-                                ) : preset.isManaged ? (
-                                  <span className="badge managed">Managed</span>
-                                ) : (
-                                  <span className="badge">Logical</span>
-                                )}
-                              </td>
-                              <td>{preset.libraryName}</td>
-                              <td
-                                style={{
-                                  fontFamily: 'var(--font-mono)',
-                                  fontSize: 11,
-                                  color: '#8b949e'
-                                }}
-                                title={`Managed: ${preset.managedPath}\nOriginal: ${preset.originalPath}`}
-                              >
-                                {preset.originalPath}
-                              </td>
+                              {libColOrder.map((col) => {
+                                switch (col) {
+                                  case 'play':
+                                    return (
+                                      <td key={col} style={{ textAlign: 'center' }}>
+                                        <button
+                                          className="icon-btn accent"
+                                          title="Preview Preset in projectM"
+                                          onClick={(e) => handlePreviewPreset(preset.id, e)}
+                                        >
+                                          <Play size={11} />
+                                        </button>
+                                      </td>
+                                    )
+                                  case 'label':
+                                    return (
+                                      <td key={col} title={preset.label}>
+                                        <strong>{preset.label}</strong>
+                                      </td>
+                                    )
+                                  case 'rating':
+                                    return (
+                                      <td key={col}>
+                                        <StarRatingCell
+                                          rating={preset.rating || 0}
+                                          onRate={(r) => {
+                                            void handleSetPresetRating([preset.id], r)
+                                          }}
+                                        />
+                                      </td>
+                                    )
+                                  case 'storage':
+                                    return (
+                                      <td key={col}>
+                                        {!preset.fileExists ? (
+                                          <span className="badge missing">Missing</span>
+                                        ) : preset.isManaged ? (
+                                          <span className="badge managed">Managed</span>
+                                        ) : (
+                                          <span className="badge">Logical</span>
+                                        )}
+                                      </td>
+                                    )
+                                  case 'libraryName':
+                                    return <td key={col}>{preset.libraryName}</td>
+                                  case 'originalPath':
+                                    return (
+                                      <td
+                                        key={col}
+                                        style={{
+                                          fontFamily: 'var(--font-mono)',
+                                          fontSize: 11,
+                                          color: '#8b949e'
+                                        }}
+                                        title={`Managed: ${preset.managedPath}\nOriginal: ${preset.originalPath}`}
+                                      >
+                                        {preset.originalPath}
+                                      </td>
+                                    )
+                                }
+                              })}
                             </tr>
                           )
                         })}
                       {libVirtual.bottomSpacerHeight > 0 && (
                         <tr aria-hidden="true" style={{ height: libVirtual.bottomSpacerHeight }}>
-                          <td colSpan={6} style={{ padding: 0, border: 'none' }} />
+                          <td colSpan={libColOrder.length} style={{ padding: 0, border: 'none' }} />
                         </tr>
                       )}
                     </tbody>
@@ -2495,23 +2817,37 @@ export const PresetWorkspace: React.FC<PresetWorkspaceProps> = ({
                   overflow: 'hidden'
                 }}
                 onDragOver={(e) => {
-                  if (e.dataTransfer.types.includes('application/x-curationist-preset-ids')) {
+                  if (
+                    e.dataTransfer.types.includes('application/x-curationist-preset-ids') ||
+                    e.dataTransfer.types.includes('application/x-curationist-preset-playlist-id')
+                  ) {
                     e.preventDefault()
                     e.dataTransfer.dropEffect = 'copy'
                   }
                 }}
                 onDrop={(e) => {
+                  if (!selectedPlaylist) return
+                  const rawPlId = e.dataTransfer.getData(
+                    'application/x-curationist-preset-playlist-id'
+                  )
+                  if (rawPlId && rawPlId !== selectedPlaylist.id) {
+                    const sourcePl = state.playlists.find((p) => p.id === rawPlId)
+                    if (sourcePl) {
+                      const presetIds = (sourcePl.items || [])
+                        .map((it) => it.presetId)
+                        .filter((id): id is string => Boolean(id))
+                      if (presetIds.length > 0) {
+                        void handleAddPresetsByIdsToPlaylist(presetIds, selectedPlaylist.id)
+                      }
+                    }
+                    return
+                  }
                   const raw = e.dataTransfer.getData('application/x-curationist-preset-ids')
-                  if (raw && selectedPlaylist) {
+                  if (raw) {
                     try {
                       const ids = JSON.parse(raw) as string[]
                       if (ids.length > 0) {
-                        window.curationist
-                          .addPresetsToPlaylist(selectedPlaylist.id, ids)
-                          .then((next) => {
-                            onStateChange(next)
-                            onNotify(`Added ${ids.length} preset(s) to "${selectedPlaylist.name}"`)
-                          })
+                        void handleAddPresetsByIdsToPlaylist(ids, selectedPlaylist.id)
                       }
                     } catch {
                       // ignore
@@ -2618,6 +2954,12 @@ export const PresetWorkspace: React.FC<PresetWorkspaceProps> = ({
                           />
                           <span>sec</span>
                         </div>
+                        <ObsLedToggle
+                          active={obsVideoMode}
+                          connected={obsConnection.connected}
+                          kind="video"
+                          onToggle={onToggleObsVideoMode}
+                        />
                         <button
                           className={`vscode-btn ${
                             isPlaylistPlaying && playingPlaylistId === selectedPlaylist.id
@@ -2674,90 +3016,59 @@ export const PresetWorkspace: React.FC<PresetWorkspaceProps> = ({
                     <table className="data-table">
                       <thead>
                         <tr>
-                          <th style={{ width: plColWidths.play }}></th>
-                          <th
-                            className="sortable-th"
-                            style={{ width: plColWidths.pos }}
-                            onClick={() => cyclePlSort('position')}
-                          >
-                            <div className="th-sort-content">
-                              <span>#</span>
-                              {plSort.col === 'position' && (
-                                <span className="sort-indicator">
-                                  {plSort.dir === 'asc' ? '▲' : '▼'}
-                                </span>
-                              )}
-                            </div>
-                            <div
-                              className="col-resize-handle"
-                              onMouseDown={(e) => startPlColResize('pos', e)}
-                              onClick={(e) => e.stopPropagation()}
-                            />
-                          </th>
-                          <th
-                            className="sortable-th"
-                            style={{ width: plColWidths.label }}
-                            onClick={() => cyclePlSort('label')}
-                          >
-                            <div className="th-sort-content">
-                              <span>Preset Label</span>
-                              {plSort.col === 'label' && (
-                                <span className="sort-indicator">
-                                  {plSort.dir === 'asc' ? '▲' : '▼'}
-                                </span>
-                              )}
-                            </div>
-                            <div
-                              className="col-resize-handle"
-                              onMouseDown={(e) => startPlColResize('label', e)}
-                              onClick={(e) => e.stopPropagation()}
-                            />
-                          </th>
-                          <th
-                            className="sortable-th"
-                            style={{ width: plColWidths.rating }}
-                            onClick={() => cyclePlSort('rating')}
-                          >
-                            <div className="th-sort-content">
-                              <span>Rating</span>
-                              {plSort.col === 'rating' && (
-                                <span className="sort-indicator">
-                                  {plSort.dir === 'asc' ? '▲' : '▼'}
-                                </span>
-                              )}
-                            </div>
-                            <div
-                              className="col-resize-handle"
-                              onMouseDown={(e) => startPlColResize('rating', e)}
-                              onClick={(e) => e.stopPropagation()}
-                            />
-                          </th>
-                          <th
-                            className="sortable-th"
-                            style={{ width: plColWidths.path }}
-                            onClick={() => cyclePlSort('path')}
-                          >
-                            <div className="th-sort-content">
-                              <span>Target Path in playlist.dat</span>
-                              {plSort.col === 'path' && (
-                                <span className="sort-indicator">
-                                  {plSort.dir === 'asc' ? '▲' : '▼'}
-                                </span>
-                              )}
-                            </div>
-                            <div
-                              className="col-resize-handle"
-                              onMouseDown={(e) => startPlColResize('path', e)}
-                              onClick={(e) => e.stopPropagation()}
-                            />
-                          </th>
-                          <th style={{ width: plColWidths.dir }}>Dir</th>
+                          {plColOrder.map((col) => {
+                            const dragProps = getPlHeaderDragProps(col)
+                            if (col === 'play' || col === 'dir') {
+                              return (
+                                <th
+                                  key={col}
+                                  {...dragProps}
+                                  className={dragProps.className}
+                                  style={{ width: plColWidths[col], cursor: 'grab' }}
+                                  title="Drag column header to reorder"
+                                >
+                                  {col === 'dir' ? 'Dir' : ''}
+                                </th>
+                              )
+                            }
+                            const sortKey: PresetPlSortCol = col === 'pos' ? 'position' : col
+                            const labelMap: Record<Exclude<PresetPlColKey, 'play' | 'dir'>, string> = {
+                              pos: '#',
+                              label: 'Preset Label',
+                              rating: 'Rating',
+                              path: 'Target Path in playlist.dat'
+                            }
+                            return (
+                              <th
+                                key={col}
+                                {...dragProps}
+                                className={`sortable-th ${dragProps.className}`.trim()}
+                                style={{ width: plColWidths[col], cursor: 'grab' }}
+                                onClick={() => cyclePlSort(sortKey)}
+                                title="Click to sort • Drag column header to reorder"
+                              >
+                                <div className="th-sort-content">
+                                  <span>{labelMap[col]}</span>
+                                  {plSort.col === sortKey && (
+                                    <span className="sort-indicator">
+                                      {plSort.dir === 'asc' ? '▲' : '▼'}
+                                    </span>
+                                  )}
+                                </div>
+                                <div
+                                  className="col-resize-handle"
+                                  onMouseDown={(e) => startPlColResize(col, e)}
+                                  onClick={(e) => e.stopPropagation()}
+                                />
+                              </th>
+                            )
+                          })}
                         </tr>
                       </thead>
                       <tbody>
                         {plVirtual.topSpacerHeight > 0 && (
                           <tr aria-hidden="true" style={{ height: plVirtual.topSpacerHeight }}>
-                            <td colSpan={6} style={{ padding: 0, border: 'none' }} />
+                            <td colSpan={plColOrder.length} style={{ padding: 0, border: 'none' }} />
                           </tr>
                         )}
                         {sortedPlaylistItems
@@ -2778,7 +3089,17 @@ export const PresetWorkspace: React.FC<PresetWorkspaceProps> = ({
                                     'application/x-curationist-preset-playlist-item-ids',
                                     JSON.stringify(dragIds)
                                   )
-                                  e.dataTransfer.effectAllowed = 'move'
+                                  const dragSet = new Set(dragIds)
+                                  const presetIds = (selectedPlaylist.items || [])
+                                    .filter((it) => dragSet.has(it.id) && it.presetId)
+                                    .map((it) => it.presetId as string)
+                                  if (presetIds.length > 0) {
+                                    e.dataTransfer.setData(
+                                      'application/x-curationist-preset-ids',
+                                      JSON.stringify(presetIds)
+                                    )
+                                  }
+                                  e.dataTransfer.effectAllowed = 'copyMove'
                                 }}
                                 onDragOver={(e) => {
                                   if (
@@ -2787,6 +3108,9 @@ export const PresetWorkspace: React.FC<PresetWorkspaceProps> = ({
                                     ) ||
                                     e.dataTransfer.types.includes(
                                       'application/x-curationist-preset-ids'
+                                    ) ||
+                                    e.dataTransfer.types.includes(
+                                      'application/x-curationist-preset-playlist-id'
                                     )
                                   ) {
                                     e.preventDefault()
@@ -2795,24 +3119,6 @@ export const PresetWorkspace: React.FC<PresetWorkspaceProps> = ({
                                 }}
                                 onDrop={async (e) => {
                                   e.stopPropagation()
-                                  const rawPresets = e.dataTransfer.getData(
-                                    'application/x-curationist-preset-ids'
-                                  )
-                                  if (rawPresets && selectedPlaylist) {
-                                    try {
-                                      const ids = JSON.parse(rawPresets) as string[]
-                                      if (ids.length > 0) {
-                                        await handleAddPresetsByIdsToPlaylist(
-                                          ids,
-                                          selectedPlaylist.id,
-                                          item.position
-                                        )
-                                      }
-                                    } catch {
-                                      // ignore
-                                    }
-                                    return
-                                  }
                                   const rawItemIds = e.dataTransfer.getData(
                                     'application/x-curationist-preset-playlist-item-ids'
                                   )
@@ -2845,62 +3151,129 @@ export const PresetWorkspace: React.FC<PresetWorkspaceProps> = ({
                                     } catch {
                                       // ignore
                                     }
+                                    return
+                                  }
+                                  const rawPlId = e.dataTransfer.getData(
+                                    'application/x-curationist-preset-playlist-id'
+                                  )
+                                  if (rawPlId && selectedPlaylist && rawPlId !== selectedPlaylist.id) {
+                                    const sourcePl = state.playlists.find((p) => p.id === rawPlId)
+                                    if (sourcePl) {
+                                      const presetIds = (sourcePl.items || [])
+                                        .map((it) => it.presetId)
+                                        .filter((id): id is string => Boolean(id))
+                                      if (presetIds.length > 0) {
+                                        await handleAddPresetsByIdsToPlaylist(
+                                          presetIds,
+                                          selectedPlaylist.id,
+                                          item.position
+                                        )
+                                      }
+                                    }
+                                    return
+                                  }
+                                  const rawPresets = e.dataTransfer.getData(
+                                    'application/x-curationist-preset-ids'
+                                  )
+                                  if (rawPresets && selectedPlaylist) {
+                                    try {
+                                      const ids = JSON.parse(rawPresets) as string[]
+                                      if (ids.length > 0) {
+                                        await handleAddPresetsByIdsToPlaylist(
+                                          ids,
+                                          selectedPlaylist.id,
+                                          item.position
+                                        )
+                                      }
+                                    } catch {
+                                      // ignore
+                                    }
+                                    return
                                   }
                                 }}
                                 onClick={(e) => handlePlaylistItemClick(e, item.id)}
                                 onContextMenu={(e) => handlePlaylistItemContextMenu(e, item)}
+                                onDoubleClick={(e) =>
+                                  handlePreviewPreset(item.presetId || item.id, e)
+                                }
                               >
-                                <td style={{ textAlign: 'center' }}>
-                                  <button
-                                    className="icon-btn accent"
-                                    title="Preview Preset in projectM"
-                                    onClick={(e) =>
-                                      handlePreviewPreset(item.presetId || item.id, e)
-                                    }
-                                  >
-                                    <Play size={11} />
-                                  </button>
-                                </td>
-                                <td style={{ fontFamily: 'var(--font-mono)', color: '#8b949e' }}>
-                                  {item.position + 1}
-                                </td>
-                                <td>
-                                  <strong>{item.label}</strong>
-                                </td>
-                                <td>
-                                  <StarRatingCell
-                                    rating={item.rating || 0}
-                                    onRate={(r) => {
-                                      if (item.presetId) {
-                                        void handleSetPresetRating([item.presetId], r)
-                                      }
-                                    }}
-                                  />
-                                </td>
-                                <td
-                                  style={{
-                                    fontFamily: 'var(--font-mono)',
-                                    fontSize: 11,
-                                    color: item.fileExists === false ? '#f14c4c' : '#8b949e'
-                                  }}
-                                  title={effectivePath}
-                                >
-                                  {effectivePath}
-                                </td>
-                                <td style={{ textAlign: 'center' }}>
-                                  <button
-                                    className="icon-btn"
-                                    title="Reveal in Windows Explorer"
-                                    onClick={(e) => {
-                                      e.stopPropagation()
-                                      window.curationist.showItemInFolder(
-                                        item.managedPath || item.originalPath
+                                {plColOrder.map((col) => {
+                                  switch (col) {
+                                    case 'play':
+                                      return (
+                                        <td key={col} style={{ textAlign: 'center' }}>
+                                          <button
+                                            className="icon-btn accent"
+                                            title="Preview Preset in projectM"
+                                            onClick={(e) =>
+                                              handlePreviewPreset(item.presetId || item.id, e)
+                                            }
+                                          >
+                                            <Play size={11} />
+                                          </button>
+                                        </td>
                                       )
-                                    }}
-                                  >
-                                    <ExternalLink size={11} />
-                                  </button>
-                                </td>
+                                    case 'pos':
+                                      return (
+                                        <td
+                                          key={col}
+                                          style={{ fontFamily: 'var(--font-mono)', color: '#8b949e' }}
+                                        >
+                                          {item.position + 1}
+                                        </td>
+                                      )
+                                    case 'label':
+                                      return (
+                                        <td key={col}>
+                                          <strong>{item.label}</strong>
+                                        </td>
+                                      )
+                                    case 'rating':
+                                      return (
+                                        <td key={col}>
+                                          <StarRatingCell
+                                            rating={item.rating || 0}
+                                            onRate={(r) => {
+                                              if (item.presetId) {
+                                                void handleSetPresetRating([item.presetId], r)
+                                              }
+                                            }}
+                                          />
+                                        </td>
+                                      )
+                                    case 'path':
+                                      return (
+                                        <td
+                                          key={col}
+                                          style={{
+                                            fontFamily: 'var(--font-mono)',
+                                            fontSize: 11,
+                                            color: item.fileExists === false ? '#f14c4c' : '#8b949e'
+                                          }}
+                                          title={effectivePath}
+                                        >
+                                          {effectivePath}
+                                        </td>
+                                      )
+                                    case 'dir':
+                                      return (
+                                        <td key={col} style={{ textAlign: 'center' }}>
+                                          <button
+                                            className="icon-btn"
+                                            title="Reveal in Windows Explorer"
+                                            onClick={(e) => {
+                                              e.stopPropagation()
+                                              window.curationist.showItemInFolder(
+                                                item.managedPath || item.originalPath
+                                              )
+                                            }}
+                                          >
+                                            <ExternalLink size={11} />
+                                          </button>
+                                        </td>
+                                      )
+                                  }
+                                })}
                               </tr>
                             )
                           })}

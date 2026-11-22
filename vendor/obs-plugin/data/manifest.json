@@ -1,0 +1,8 @@
+{
+  "id": "milkyway",
+  "name": "milkyway",
+  "display_name": "milkyWay",
+  "version": "0.1.0",
+  "os_arch": "windows-x64",
+  "description": "Independent audio with album-art effects and audio-driven projectM visualization sources."
+}

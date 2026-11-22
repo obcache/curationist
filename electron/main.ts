@@ -2,12 +2,14 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, protocol, shell } from 'elec
 import { spawn, type ChildProcess } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
+import { Readable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 import {
   getMusicWorkspaceState,
   getPresetWorkspaceState,
   getSettings,
   getTrackCoverArt,
+  getVideoWorkspaceState,
   initDatabase,
   updateSettings
 } from './db'
@@ -19,14 +21,19 @@ import {
   logEvent
 } from './logger'
 import {
+  addClipsToVideoPlaylist,
   addPresetsToPresetPlaylist,
   addTracksToMusicPlaylist,
+  copyClipsToManagedStorage,
   copyPresetsToManagedStorage,
   copyTracksToManagedStorage,
   createMp3Library,
   createMusicPlaylist,
   createPresetLibrary,
   createPresetPlaylist,
+  createVideoLibrary,
+  createVideoPlaylist,
+  deleteClipsFromDisk,
   deleteMp3Library,
   deleteMusicPlaylist,
   deleteMusicPlaylistItemsFromDisk,
@@ -35,39 +42,62 @@ import {
   deletePresetPlaylistItemsFromDisk,
   deletePresetsFromDisk,
   deleteTracksFromDisk,
+  deleteVideoLibrary,
+  deleteVideoPlaylist,
+  deleteVideoPlaylistItemsFromDisk,
   discardMusicDraft,
   discardPresetDraft,
   duplicateMusicPlaylist,
   duplicatePresetPlaylist,
+  duplicateVideoPlaylist,
   exportSingleMusicPlaylistToJson,
   importMp3FilesOrFolders,
   importMusicJsonFile,
   importPresetFilesOrFolders,
   importPresetLibraryJsonFile,
   importPresetPlaylistDatFile,
+  importVideoFilesOrFolders,
+  inspectMp3TrackDetailedMetadata,
   inspectPreset,
   previewPresetInMilkdrop,
+  publishVideoPlaylists,
   publishMusicPlaylistsToSavedJson,
   publishPresetsToObspiltMilk,
+  refreshMp3TracksMetadata,
   relabelPreset,
+  removeClipsFromVideoLibrary,
   removeItemsFromMusicPlaylist,
   removeItemsFromPresetPlaylist,
+  removeItemsFromVideoPlaylist,
   removePresetsFromLibrary,
   removeTracksFromMp3Library,
   renameMp3Library,
   renameMusicPlaylist,
   renamePresetLibrary,
   renamePresetPlaylist,
+  renameVideoLibrary,
+  renameVideoPlaylist,
   reorderMusicPlaylistItems,
   reorderPresetPlaylistItems,
+  reorderVideoPlaylistItems,
   seedInitialDataIfEmpty,
   setActiveMusicJsonPlaylists,
   setActivePresetPlaylist,
+  setActiveVideoPlaylist,
+  setMp3TracksRating,
   setPresetsRating,
+  setVideoClipsRating,
   shutdownMilkdropPreviewBridge,
   updateMp3Tags,
-  updateMusicPlaylistItemInline
+  updateMusicPlaylistItemInline,
+  updateVideoClipMetadata
 } from './sync-service'
+import {
+  closeMilkLabWindowOnQuit,
+  openMilkLabEditor,
+  registerMilkLabService
+} from './milklab-service'
+import { obsService } from './obs-service'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -223,6 +253,49 @@ function createWindow() {
     }
   })
 
+  const detachedPopouts = new Set<BrowserWindow>()
+
+  mainWindow.webContents.setWindowOpenHandler(({ frameName }) => {
+    if (frameName && frameName.startsWith('curationist-popout:')) {
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          frame: true,
+          autoHideMenuBar: true,
+          backgroundColor: '#111216',
+          icon: resolveAppIconPath(),
+          minWidth: 320,
+          minHeight: 200,
+          resizable: true,
+          maximizable: true,
+          fullscreenable: true,
+          webPreferences: {
+            contextIsolation: true,
+            nodeIntegration: false
+          }
+        }
+      }
+    }
+    return { action: 'deny' }
+  })
+
+  mainWindow.webContents.on('did-create-window', (childWin) => {
+    childWin.setMenuBarVisibility(false)
+    detachedPopouts.add(childWin)
+    childWin.on('closed', () => {
+      detachedPopouts.delete(childWin)
+    })
+  })
+
+  mainWindow.on('closed', () => {
+    for (const pop of Array.from(detachedPopouts)) {
+      if (!pop.isDestroyed()) {
+        pop.close()
+      }
+    }
+    detachedPopouts.clear()
+  })
+
   // Also set native menu for keyboard shortcuts
   const menuTemplate: Electron.MenuItemConstructorOptions[] = [
     {
@@ -313,9 +386,17 @@ app.whenReady().then(async () => {
         '.mp3': 'audio/mpeg',
         '.wav': 'audio/wav',
         '.flac': 'audio/flac',
+        '.ogg': 'audio/ogg',
+        '.opus': 'audio/opus',
         '.m4a': 'audio/mp4',
         '.aif': 'audio/aiff',
-        '.aiff': 'audio/aiff'
+        '.aiff': 'audio/aiff',
+        '.mp4': 'video/mp4',
+        '.m4v': 'video/mp4',
+        '.webm': 'video/webm',
+        '.mkv': 'video/x-matroska',
+        '.mov': 'video/quicktime',
+        '.avi': 'video/x-msvideo'
       }
       const contentType = mimeMap[ext] || 'application/octet-stream'
       const rangeHeader = request.headers.get('range')
@@ -324,13 +405,21 @@ app.whenReady().then(async () => {
         const match = /bytes=(\d+)-(\d*)/.exec(rangeHeader)
         if (match) {
           const start = Number.parseInt(match[1], 10)
-          const end = match[2] ? Number.parseInt(match[2], 10) : total - 1
+          if (start >= total) {
+            return new Response(null, {
+              status: 416,
+              headers: {
+                'Content-Range': `bytes */${total}`,
+                'Accept-Ranges': 'bytes'
+              }
+            })
+          }
+          const requestedEnd = match[2] ? Number.parseInt(match[2], 10) : total - 1
+          const end = Math.min(total - 1, Math.max(start, requestedEnd))
           const chunkSize = end - start + 1
-          const buffer = Buffer.alloc(chunkSize)
-          const fd = fs.openSync(rawPath, 'r')
-          fs.readSync(fd, buffer, 0, chunkSize, start)
-          fs.closeSync(fd)
-          return new Response(buffer, {
+          const nodeStream = fs.createReadStream(rawPath, { start, end })
+          nodeStream.on('error', () => {})
+          return new Response(Readable.toWeb(nodeStream) as unknown as BodyInit, {
             status: 206,
             headers: {
               'Content-Range': `bytes ${start}-${end}/${total}`,
@@ -342,8 +431,9 @@ app.whenReady().then(async () => {
         }
       }
 
-      const data = fs.readFileSync(rawPath)
-      return new Response(data, {
+      const fullStream = fs.createReadStream(rawPath)
+      fullStream.on('error', () => {})
+      return new Response(Readable.toWeb(fullStream) as unknown as BodyInit, {
         status: 200,
         headers: {
           'Accept-Ranges': 'bytes',
@@ -369,8 +459,14 @@ app.whenReady().then(async () => {
   await seedInitialDataIfEmpty()
 
   registerIpcHandlers()
+  registerMilkLabService((nextPresetState) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('curationist:preset-state-changed', nextPresetState)
+    }
+  })
   createWindow()
   startProjectMHost().catch(() => {})
+  obsService.getPluginStatus().catch(() => {})
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
@@ -378,6 +474,7 @@ app.whenReady().then(async () => {
 })
 
 app.on('will-quit', () => {
+  closeMilkLabWindowOnQuit()
   shutdownProjectMHost()
   shutdownMilkdropPreviewBridge()
 })
@@ -566,6 +663,18 @@ function registerIpcHandlers() {
     const res = updateMp3Tags(payload)
     return { ...res, state: getMusicWorkspaceState() }
   })
+  ipcMain.handle('music:setRating', (_e, trackIds: string[], rating: number) => {
+    const res = setMp3TracksRating(trackIds, rating)
+    return { ...res, state: getMusicWorkspaceState() }
+  })
+  ipcMain.handle('music:inspectTrackMetadata', async (_e, trackId: string) => {
+    const detail = await inspectMp3TrackDetailedMetadata(trackId)
+    return { detail, state: getMusicWorkspaceState() }
+  })
+  ipcMain.handle('music:refreshMetadata', async (_e, trackIds?: string[]) => {
+    const res = await refreshMp3TracksMetadata(trackIds)
+    return { ...res, state: getMusicWorkspaceState() }
+  })
   ipcMain.handle('music:importJsonFile', async (_e, filePath: string, markActive: boolean) => {
     const res = await importMusicJsonFile(filePath, markActive)
     return { ...res, state: getMusicWorkspaceState() }
@@ -609,8 +718,13 @@ function registerIpcHandlers() {
     setActiveMusicJsonPlaylists(orderedPlaylistIds)
     return getMusicWorkspaceState()
   })
-  ipcMain.handle('music:publishSavedPlaylists', () => {
+  ipcMain.handle('music:publishSavedPlaylists', async () => {
     const res = publishMusicPlaylistsToSavedJson()
+    try {
+      await obsService.publishAudioQueueToObs()
+    } catch {
+      // ignore if milkyWay Audio source not yet configured
+    }
     return { ...res, state: getMusicWorkspaceState() }
   })
   ipcMain.handle('music:exportSinglePlaylist', (_e, playlistId: string, targetPath: string) => {
@@ -734,8 +848,13 @@ function registerIpcHandlers() {
     reorderPresetPlaylistItems(playlistId, orderedIds)
     return getPresetWorkspaceState()
   })
-  ipcMain.handle('presets:publish', () => {
+  ipcMain.handle('presets:publish', async () => {
     const res = publishPresetsToObspiltMilk()
+    try {
+      await obsService.publishVideoQueueToObs()
+    } catch {
+      // ignore if milkyWay Video source not yet configured
+    }
     return { ...res, state: getPresetWorkspaceState() }
   })
   ipcMain.handle('presets:discardDraft', () => {
@@ -744,5 +863,194 @@ function registerIpcHandlers() {
   })
   ipcMain.handle('projectm:getPort', async () => {
     return await startProjectMHost()
+  })
+
+  // milkLab Preset IDE Integration
+  ipcMain.handle(
+    'milklab:open',
+    async (
+      _e,
+      options: { mode: 'new' | 'edit'; presetId?: string; libraryId?: string }
+    ) => {
+      return await openMilkLabEditor(options)
+    }
+  )
+
+  // OBS Integration (milkyWay Audio & milkyWay Video)
+  ipcMain.handle('obs:getConnectionState', () => obsService.getConnectionState())
+  ipcMain.handle('obs:connect', (_e, endpoint?: string, password?: string) =>
+    obsService.connect(endpoint, password)
+  )
+  ipcMain.handle('obs:disconnect', () => obsService.disconnect())
+  ipcMain.handle('obs:refreshSources', () => obsService.refreshSources())
+  ipcMain.handle('obs:getSourceStatus', (_e, sourceId: string) =>
+    obsService.getSourceStatus(sourceId)
+  )
+  ipcMain.handle('obs:getSourceQueue', (_e, sourceId: string) =>
+    obsService.getSourceQueue(sourceId)
+  )
+  ipcMain.handle('obs:controlSource', (_e, control) =>
+    obsService.controlSource(control)
+  )
+  ipcMain.handle(
+    'obs:setPlaybackModes',
+    (
+      _e,
+      sourceId: string,
+      loop: boolean,
+      shuffle: boolean,
+      advanceOnSongChange?: boolean,
+      crossfadeSec?: number
+    ) => obsService.setPlaybackModes(sourceId, loop, shuffle, advanceOnSongChange, crossfadeSec)
+  )
+  ipcMain.handle(
+    'obs:setPresetTiming',
+    (
+      _e,
+      sourceId: string,
+      intervalMs: number,
+      autoAdvance: boolean,
+      advanceOnSongChange?: boolean
+    ) => obsService.setPresetTiming(sourceId, intervalMs, autoAdvance, advanceOnSongChange)
+  )
+  ipcMain.handle('obs:getAudioSettings', (_e, sourceId: string) =>
+    obsService.getAudioSettings(sourceId)
+  )
+  ipcMain.handle('obs:setAudioSettings', (_e, settings) =>
+    obsService.setAudioSettings(settings)
+  )
+  ipcMain.handle('obs:getVideoSettings', (_e, sourceId: string) =>
+    obsService.getVideoSettings(sourceId)
+  )
+  ipcMain.handle('obs:setVideoSettings', (_e, settings) =>
+    obsService.setVideoSettings(settings)
+  )
+  ipcMain.handle('obs:getAudioDrivers', (_e, sourceId: string) =>
+    obsService.getAudioDrivers(sourceId)
+  )
+  ipcMain.handle('obs:publishAudioQueue', (_e, options) =>
+    obsService.publishAudioQueueToObs(options)
+  )
+  ipcMain.handle('obs:publishClipQueue', (_e, options) =>
+    obsService.publishClipQueueToObs(options)
+  )
+  ipcMain.handle('obs:publishVideoQueue', (_e, options) =>
+    obsService.publishVideoQueueToObs(options)
+  )
+  ipcMain.handle('obs:resolvePublishedAssetPath', (_e, relativeAsset: string) =>
+    obsService.resolvePublishedAssetPath(relativeAsset)
+  )
+  ipcMain.handle('obs:getPluginStatus', () => obsService.getPluginStatus())
+  ipcMain.handle('obs:selectObsExecutable', () => obsService.selectObsExecutable(mainWindow))
+  ipcMain.handle('obs:installPlugin', () => obsService.installPlugin())
+
+  // Video Studio (Curationist Video Libraries & Playlists)
+  ipcMain.handle('video:getState', () => getVideoWorkspaceState())
+  ipcMain.handle('video:createLibrary', (_e, name: string, desc?: string) => {
+    createVideoLibrary(name, desc)
+    return getVideoWorkspaceState()
+  })
+  ipcMain.handle('video:renameLibrary', (_e, id: string, name: string) => {
+    renameVideoLibrary(id, name)
+    return getVideoWorkspaceState()
+  })
+  ipcMain.handle('video:deleteLibrary', (_e, id: string) => {
+    deleteVideoLibrary(id)
+    return getVideoWorkspaceState()
+  })
+  ipcMain.handle(
+    'video:importMedia',
+    async (
+      _e,
+      paths: string[],
+      libraryId: string,
+      copyToManaged: boolean,
+      options?: { targetFolderPath?: string; move?: boolean }
+    ) => {
+      const batch = await importVideoFilesOrFolders(paths, libraryId, copyToManaged, options)
+      return { batch, state: getVideoWorkspaceState() }
+    }
+  )
+  ipcMain.handle(
+    'video:copyToManaged',
+    (_e, clipIds: string[], options?: { targetFolderPath?: string; move?: boolean }) => {
+      const res = copyClipsToManagedStorage(clipIds, options)
+      return { ...res, state: getVideoWorkspaceState() }
+    }
+  )
+  ipcMain.handle('video:removeClips', (_e, clipIds: string[]) => {
+    removeClipsFromVideoLibrary(clipIds)
+    return getVideoWorkspaceState()
+  })
+  ipcMain.handle('video:deleteClipsFromDisk', (_e, clipIds: string[]) => {
+    const res = deleteClipsFromDisk(clipIds)
+    return { ...res, state: getVideoWorkspaceState() }
+  })
+  ipcMain.handle('video:setRating', (_e, clipIds: string[], rating: number) => {
+    setVideoClipsRating(clipIds, rating)
+    return getVideoWorkspaceState()
+  })
+  ipcMain.handle(
+    'video:updateMetadata',
+    (_e, payload: { clipId: string; title?: string; artist?: string; duration?: number }) => {
+      updateVideoClipMetadata(payload)
+      return getVideoWorkspaceState()
+    }
+  )
+  ipcMain.handle('video:createPlaylist', (_e, name: string, makeActive = false) => {
+    const newId = createVideoPlaylist(name, makeActive)
+    return { newId, state: getVideoWorkspaceState() }
+  })
+  ipcMain.handle('video:renamePlaylist', (_e, id: string, newName: string) => {
+    renameVideoPlaylist(id, newName)
+    return getVideoWorkspaceState()
+  })
+  ipcMain.handle('video:duplicatePlaylist', (_e, id: string) => {
+    const newId = duplicateVideoPlaylist(id)
+    return { newId, state: getVideoWorkspaceState() }
+  })
+  ipcMain.handle('video:deletePlaylist', (_e, id: string) => {
+    deleteVideoPlaylist(id)
+    return getVideoWorkspaceState()
+  })
+  ipcMain.handle('video:setActivePlaylist', (_e, id: string) => {
+    setActiveVideoPlaylist(id)
+    return getVideoWorkspaceState()
+  })
+  ipcMain.handle(
+    'video:addClipsToPlaylist',
+    (_e, playlistId: string, clipIds: string[], pos?: number) => {
+      addClipsToVideoPlaylist(playlistId, clipIds, pos)
+      return getVideoWorkspaceState()
+    }
+  )
+  ipcMain.handle('video:removeItemsFromPlaylist', (_e, playlistId: string, itemIds: string[]) => {
+    removeItemsFromVideoPlaylist(playlistId, itemIds)
+    return getVideoWorkspaceState()
+  })
+  ipcMain.handle(
+    'video:deletePlaylistItemsFromDisk',
+    (_e, playlistId: string, itemIds: string[]) => {
+      const res = deleteVideoPlaylistItemsFromDisk(playlistId, itemIds)
+      return { ...res, state: getVideoWorkspaceState() }
+    }
+  )
+  ipcMain.handle(
+    'video:reorderPlaylistItems',
+    (_e, playlistId: string, orderedIds: string[]) => {
+      reorderVideoPlaylistItems(playlistId, orderedIds)
+      return getVideoWorkspaceState()
+    }
+  )
+  ipcMain.handle('video:publish', async () => {
+    const res = publishVideoPlaylists()
+    let publishedSources = 0
+    try {
+      const obsRes = await obsService.publishClipQueueToObs()
+      publishedSources = obsRes.publishedSources
+    } catch {
+      // ignore if Curationist Video source not yet configured
+    }
+    return { ...res, publishedSources, state: getVideoWorkspaceState() }
   })
 }
