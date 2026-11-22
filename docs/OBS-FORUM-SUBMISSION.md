@@ -17,10 +17,11 @@ Ready-to-use copy for submitting **Curationist** to the [OBS Project Resources �
 - **Additional Information / Website URL:** `https://sorryneedboost.com`
 
 ### Screenshots to Upload & Attach
-Upload these three files from `docs/screenshots/` to the forum post and insert them where marked `[INSERT SCREENSHOT ...]` below:
+Upload these four files from `docs/screenshots/` to the forum post and insert them where marked `[INSERT SCREENSHOT ...]` below:
 1. `docs/screenshots/curationist-obs-live.jpg` — *Hero image (also set as the Resource Icon / Cover or first inline screenshot)*
-2. `docs/screenshots/setup-wizard-step1-plugin.jpg` — *Setup Wizard Step 1: Native OBS Plugin installer*
-3. `docs/screenshots/setup-wizard-step2-websocket.jpg` — *Setup Wizard Step 2: OBS WebSocket & Auto-Connect*
+2. `docs/screenshots/milklab-preset-ide.jpg` — *Bundled milkLab Preset IDE (visual node workflow editor + live projectM preview)*
+3. `docs/screenshots/setup-wizard-step1-plugin.jpg` — *Setup Wizard Step 1: Native OBS Plugin installer*
+4. `docs/screenshots/setup-wizard-step2-websocket.jpg` — *Setup Wizard Step 2: OBS WebSocket & Auto-Connect*
 
 ---
 
@@ -54,11 +55,13 @@ Installing the bundled plugin (one click from the in-app Setup Wizard into [ICOD
 [LIST]
 [*][B]Audio, Video & Visualizer Workspaces[/B] — Dense, dockable VS Code-styled interface backed by local SQLite. Organize multiple logical libraries, filter by recursive folder tree or 5-star ratings, batch-edit ID3 tags/cover art/synced lyrics, and stage playlists with Play Now, Play Next, Append, or Publish.
 [*][B]Automatic .milk Preset Validator & Repair + Built-In Preview[/B] — Validates and automatically repairs common MilkDrop shader compatibility issues for projectM v4 on import, with a live embedded projectM v4 preview panel.
-[*][B]Bundled milkLab Preset IDE[/B] — Create new [ICODE].milk[/ICODE] presets ([ICODE]Ctrl+N[/ICODE]) or edit existing presets ([ICODE]Ctrl+E[/ICODE]) with real-time equation linting and instant sync back into your Curationist library.
+[*][B]Bundled milkLab Preset IDE[/B] — Create new [ICODE].milk[/ICODE] presets ([ICODE]Ctrl+N[/ICODE]) or edit existing presets ([ICODE]Ctrl+E[/ICODE]) using either the visual node-based Workflow editor (wave generator + composable motion, color & echo effect blocks) or the Source code editor, with real-time projectM preview, equation linting, and instant sync back into your Curationist library.
 [*][B]Universal Control Surface & Master OB Toggle[/B] — Persistent transport bar with Audio shuttle, live Video preview, and live projectM preview. Flip individual [B]OB[/B] remote toggles (or the 3-position [B]Master OB Toggle[/B]) to switch cleanly between local auditioning and live OBS WebSocket control.
 [*][B]Performance Mode & Detachable Popouts[/B] — Expand into a distraction-free fullscreen live command deck or pop out the control surface / individual monitors onto a second display without interrupting playback.
 [*][B]Persistent OBS WebSocket v5 Connection[/B] — Automatically connects on startup, polls every 3 seconds to stay connected, and self-heals source bindings if you recreate a source in OBS.
 [/LIST]
+
+[INSERT SCREENSHOT 2: milklab-preset-ide.jpg]
 
 [HR][/HR]
 
@@ -71,8 +74,8 @@ Installing the bundled plugin (one click from the in-app Setup Wizard into [ICOD
 [*]Add [B]Curationist Audio[/B], [B]Curationist Video[/B], and/or [B]Curationist Visualizer[/B] to your OBS scene, choose your audio driver in the Visualizer settings, publish a playlist, and flip [B]OB[/B] to ON!
 [/LIST]
 
-[INSERT SCREENSHOT 2: setup-wizard-step1-plugin.jpg]
-[INSERT SCREENSHOT 3: setup-wizard-step2-websocket.jpg]
+[INSERT SCREENSHOT 3: setup-wizard-step1-plugin.jpg]
+[INSERT SCREENSHOT 4: setup-wizard-step2-websocket.jpg]
 
 [HR][/HR]
 

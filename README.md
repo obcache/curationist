@@ -67,8 +67,10 @@ The bundled C++ OBS plugin adds three dedicated sources to OBS Studio's **Add So
 ### 3. Curationist Visualizer Workspace (`Ctrl+3`) & `milkLab` Preset IDE
 - **Automatic Preset Validation & Repair**: When importing `.milk` files, Curationist inspects and repairs common shader/syntax issues for **projectM v4**, tagging presets with clear `VALIDATED`, `REPAIRED`, or warning badges and displaying full shader source & repair details in the **Preset Validator & Shader Inspector**.
 - **Embedded Native projectM v4 Live Preview**: Audition presets in real time inside the workspace via Curationist's bundled native projectM host (`projectM-4.dll`), or point the preview to mirror your live OBS visualizer.
-- **Bundled `milkLab` Preset IDE (`Ctrl+N` / `Ctrl+E`)**: Launch a dedicated preset authoring environment with starter templates, live projectM equation linting, and automatic sync back into Curationist's SQLite database and managed preset folders.
+- **Bundled `milkLab` Preset IDE (`Ctrl+N` / `Ctrl+E`)**: Launch a dedicated MilkDrop preset authoring studio featuring both a **visual node-based Workflow editor** (with wave-shape generator controls and composable motion, color, and feedback effect nodes) and a **Source code editor** with real-time projectM equation linting, live projectM preview, and automatic sync back into Curationist's SQLite database and managed preset folders.
 - **Legacy Compatibility**: Supports importing and publishing `obSpiltMilk` `library.json` and `playlist.dat` files alongside native OBS queue publishing.
+
+![milkLab Preset IDE showing the visual node workflow editor, wave generator, effect blocks, and live projectM preview](docs/screenshots/milklab-preset-ide.jpg)
 
 ### 4. Universal Control Surface, Master OB Toggle & Performance Mode
 - **Always-On Transport Deck**: The persistent bottom bar keeps **Audio Shuttle** (with clickable track titles that jump straight to the song in your library), **Live Video Preview**, and **Live projectM Preset Preview** accessible from every workspace.

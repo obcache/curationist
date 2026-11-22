@@ -54,7 +54,10 @@ When it's time to focus purely on the broadcast, **Performance Mode** expands in
 
 ### Built-In Shader Repair & `milkLab` Preset IDE
 
-Classic MilkDrop preset collections often contain subtle syntax quirks that break modern renderers. Curationist automatically validates and repairs `.milk` presets on import for projectM v4, showing full shader diagnostics and live native previews right inside the workspace. And whenever you want to build something original, pressing `Ctrl+N` or `Ctrl+E` opens the bundled **milkLab Preset IDE** with live equation linting and automatic two-way sync back to your Curationist library.
+Classic MilkDrop preset collections often contain subtle syntax quirks that break modern renderers. Curationist automatically validates and repairs `.milk` presets on import for projectM v4, showing full shader diagnostics and live native previews right inside the workspace. And whenever you want to build something original, pressing `Ctrl+N` or `Ctrl+E` opens the bundled **milkLab Preset IDE**—offering both a visual node-graph workflow (with wave generators and composable motion, color, and echo effects) and direct source editing with live equation linting, real-time projectM preview, and automatic two-way sync back to your Curationist library.
+
+> **Suggested Inline Media:** `docs/screenshots/milklab-preset-ide.jpg`
+> **Caption:** `Bundled milkLab Preset IDE: author and edit MilkDrop .milk presets visually with composable wave and effect nodes or direct equation code, with real-time projectM preview.`
 
 ---
 
@@ -100,10 +103,14 @@ Classic MilkDrop preset collections often contain subtle syntax quirks that brea
    - **Alt text:** `Curationist Studio running side-by-side with OBS Studio 33, displaying the projectM preset workspace, Universal Control Surface, and a live OBS broadcast combining Curationist Audio, Video, and Visualizer sources.`
    - **Caption:** `Live broadcast setup: Curationist driving synchronized audio, video overlay, and audio-reactive projectM shaders natively inside OBS Studio 33.`
 
-2. **`docs/screenshots/setup-wizard-step1-plugin.jpg`**
+2. **`docs/screenshots/milklab-preset-ide.jpg`**
+   - **Alt text:** `The bundled milkLab Preset IDE displaying its visual node-based Workflow editor with a Wave generator, chained Tidal warp, Color shift, Kaleido fold, and Echo trails effect blocks, alongside a live projectM shader preview and synced preset library.`
+   - **Caption:** `Bundled milkLab Preset IDE: build or customize MilkDrop .milk presets visually with composable wave and effect nodes—or edit raw equations—with real-time projectM preview.`
+
+3. **`docs/screenshots/setup-wizard-step1-plugin.jpg`**
    - **Alt text:** `Curationist Welcome and OBS Integration Setup Wizard Step 1 showing one-click installation status for the native C++ OBS Studio plugin bundle.`
    - **Caption:** `Step 1 of the guided Setup Wizard detects OBS Studio 33+ and installs the native Curationist Audio, Video, and Visualizer sources in one click.`
 
-3. **`docs/screenshots/setup-wizard-step2-websocket.jpg`**
+4. **`docs/screenshots/setup-wizard-step2-websocket.jpg`**
    - **Alt text:** `Curationist Welcome and OBS Integration Setup Wizard Step 2 showing OBS WebSocket server instructions, password input, and persistent auto-connect toggle.`
    - **Caption:** `Step 2 connects Curationist to OBS WebSocket v5 with persistent auto-reconnect and automatic source discovery.`
